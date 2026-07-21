@@ -70,8 +70,8 @@ _ALL_MODELS = [
         "label": "Hybrid (cascade, 292d, physics)",
         "tier": "balanced",
         "description": (
-            "FINAL hybrid cascade trained on the full 292-domain split with "
-            "physics losses. Best aggregate accuracy and fastest inference; "
+            "Final hybrid cascade trained on the full 292-domain split with "
+            "y-reflection augmentation and physics losses. Best aggregate accuracy and fastest inference; "
             "smoother between closely spaced grid structures than the 3D UNet."
         ),
         "kind": "cascade",
@@ -92,8 +92,8 @@ _ALL_MODELS = [
         "label": "3D UNet (cascade, 292d, physics)",
         "tier": "accurate",
         "description": (
-            "FINAL grid U-Net cascade trained on the full 292-domain split with "
-            "physics losses. Better at inter-structure high-speed corridors, but "
+            "Final grid U-Net cascade trained on the full 292-domain split with "
+            "y-reflection augmentation and physics losses. Better at inter-structure high-speed corridors, but "
             "slow on CPU (tiled 3D inference; wants a GPU)."
         ),
         "kind": "cascade",

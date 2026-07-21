@@ -1,8 +1,9 @@
 # Data
 
-The training data and the structure geometry are **not** stored in this git
-repository. They will live in a public data archive (see "Where to get it" below)
-and are downloaded once into the layout the code expects.
+The training CFD fields are **not** stored in this git repository. They will
+live in a public data archive (see "Where to get it" below) and are downloaded
+once into the layout the code expects. The lightweight STL primitive library is
+included under `single_stl/`.
 
 ## What the dataset contains
 
@@ -37,19 +38,35 @@ Place the downloaded data so the paths in `pinnfluid/config.py` resolve
 (`DATA_CFD_ROOT = <repo>/data/cfd`):
 
 ```
-source/
-  data/
-    cfd/
-      complexterrain_only/<case>/{terrain.npz, flow.npz, nut.npy, meta.json}
-      singlestructures/  <case>/...
-      multistructures/   <case>/...
-  single_stl/            *.stl        (structure primitive library)
-  pinnfluid/splits/recommended_292domains_struct_al_full.json   (already in git)
+data/
+  cfd/
+    complexterrain_only/<case>/{terrain.npz, flow.npz, nut.npy, meta.json}
+    singlestructures/  <case>/...
+    multistructures/   <case>/...
+single_stl/            *.stl        (structure primitive library)
+pinnfluid/splits/recommended_292domains_struct_al_full.json
 ```
 
-Both `data/` and `single_stl/` are git-ignored. The 292-domain split that
-selects the train/val/test cases is small and ships with the code under
-`pinnfluid/splits/`.
+`data/` is git-ignored. The 292-domain split that selects the train/val/test
+cases and the STL library both ship with the code.
+
+## Final-model y-reflection augmentation
+
+The final models use each of the 256 training domains together with a physical
+reflection across the domain y-midline. Validation and test are not augmented.
+Build this derived root without modifying `data/cfd`:
+
+```bash
+python pinnfluid/input_prep/make_y_mirror_cfd.py \
+  --source-root data/cfd \
+  --output-root data/cfd_ymirror \
+  --split-json pinnfluid/splits/recommended_292domains_struct_al_full.json \
+  --output-split pinnfluid/splits/recommended_292domains_struct_al_full_ymirror.json
+```
+
+The output contains relative symlinks to the 292 original cases and real
+mirrored copies of the 256 training cases. The mirrored split therefore has
+512 training entries and the unchanged 18 validation and 18 test entries.
 
 ## Where to get it
 

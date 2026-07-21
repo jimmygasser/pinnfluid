@@ -1,7 +1,7 @@
-name: iter4_struct292_hybrid_cascade
+name: final_hybrid_292_ymirror
 
 base:
-  split_json: scripts/splits/recommended_292domains_struct_al_full.json
+  split_json: pinnfluid/splits/recommended_292domains_struct_al_full_ymirror.json
   device: cuda
   epochs: 500
   mode: pinn
@@ -9,14 +9,16 @@ base:
   amp: false
   resume: true
   wandb_project: pinn_terr_struc
-  wandb_tags: iter4,struct292,hybrid_cascade,pinn
+  wandb_tags: final,292domains,ymirror,hybrid,pinn
   plot_eval: true
   train_loss: charb_weighted
-  momentum_loss_mode: constant
+  momentum_loss_mode: nut
+  overrides:
+    DATA_CFD_ROOT: data/cfd_ymirror
 
 runs:
-  - id: pot2_292_globalrf_fulldomainrf
-    experiment_name: sweep/iter4_struct292/pot2_292_globalrf_fulldomainrf
+  - id: hybrid-stage1-292d
+    experiment_name: final/hybrid-stage1-292d
     model: hybrid
     train_struc_mode: none
     train_struc_weight: 0.0
@@ -31,15 +33,17 @@ runs:
       GLOBAL_ENCODER_DEPTH: 5
       GLOBAL_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
 
-  - id: cascade_stage2_292_hybridbg_targeted_structrf_roirf
-    experiment_name: sweep/iter4_struct292/cascade_stage2_292_hybridbg_targeted_structrf_roirf
+  - id: hybrid-stage2-292d
+    experiment_name: final/hybrid-stage2-292d
     model: cascade
     train_struc_mode: grad
     train_struc_weight: 0.10
-    cascade_stage1_checkpoint: results/sweep/iter4_struct292/pot2_292_globalrf_fulldomainrf/checkpoints/best.pth
+    cascade_stage1_checkpoint: results/final/hybrid-stage1-292d/checkpoints/best.pth
     overrides:
       CASCADE_STAGE: stage2
       CASCADE_ZERO_INIT_HEAD: true
+      NUM_FOURIER_FEATURES: 8
+      FOURIER_SIGMA: 2.0
       STRUCTURE_ENCODER_INPUT_MODE: context_v2
       GLOBAL_ENCODER_DEPTH: 5
       GLOBAL_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
@@ -48,13 +52,18 @@ runs:
       CASCADE_EDGE_WEIGHT: 0.25
       CASCADE_EDGE_BAND_XY_M: 15.0
       CASCADE_EDGE_BAND_Z_M: 10.0
+      CASCADE_STAGE2_MS_REPEAT_ENABLED: true
+      CASCADE_STAGE2_MS_REPEAT_N2: 8
+      CASCADE_STAGE2_MS_REPEAT_N3: 24
+      CASCADE_STAGE2_MS_REPEAT_MAX: 3
       ROI_POINTS_PER_DOMAIN: 16384
       ROI_PATCHES_PER_DOMAIN: 4
       ROI_SUPERVISED_SAMPLER_MODE: targeted_v1
-      ROI_TARGET_VERY_NEAR_WALL_FRAC: 0.20
-      ROI_TARGET_NEAR_WALL_FRAC: 0.25
-      ROI_TARGET_GEOM_WAKE_FRAC: 0.25
-      ROI_TARGET_LOW_SPEED_FRAC: 0.20
+      ROI_TARGET_VERY_NEAR_WALL_FRAC: 0.15
+      ROI_TARGET_NEAR_WALL_FRAC: 0.20
+      ROI_TARGET_GEOM_WAKE_FRAC: 0.20
+      ROI_TARGET_LOW_SPEED_FRAC: 0.15
+      ROI_TARGET_HIGH_SPEED_FRAC: 0.20
       ROI_TARGET_RANDOM_FRAC: 0.10
       ROI_TARGET_VERY_NEAR_WALL_DMAX: 1.0
       ROI_TARGET_VERY_NEAR_WALL_MAX_REPEAT: 4
@@ -64,15 +73,17 @@ runs:
       ROI_TARGET_WAKE_ZREL_MAX: 30.0
       ROI_TARGET_LOW_SPEED_RATIO_MAX: 0.75
       ROI_TARGET_LOW_SPEED_ZREL_MAX: 30.0
+      ROI_TARGET_HIGH_SPEED_RATIO_MIN: 1.05
+      ROI_TARGET_HIGH_SPEED_ZREL_MAX: 30.0
       ROI_TARGET_MAX_ABOVE_STRUCTURE_H: 2.0
       STRUCTURE_ENCODER_DEPTH: 5
       STRUCTURE_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
       ROI_ENCODER_DEPTH: 5
       ROI_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
       W_DATA_ROI: 5.0
-      W_PHYS_ROI: 0.0
-      W_DIV_ROI: 0.0
-      W_MOM_ROI: 0.0
+      W_PHYS_ROI: 1.0
+      W_DIV_ROI: 0.05
+      W_MOM_ROI: 0.02
       W_BC_WALL_ROI: 0.0
       ROI_DATA_P_WEIGHT: 3.0
       SUP_WEIGHT_NEAR_STRUCTURE_GAIN: 3.0
@@ -80,4 +91,6 @@ runs:
       SUP_WEIGHT_WAKE_GAIN: 3.0
       SUP_WEIGHT_WAKE_ZREL_MAX: 30.0
       SUP_WEIGHT_WAKE_SPEED_RATIO_MAX: 0.75
+      VAL_SELECTOR_USE_GAUGE_P: true
+      VAL_SELECTOR_MS_ROI_UMAG_WEIGHT: 0.35
       LR: 3.0e-5

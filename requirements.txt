@@ -6,7 +6,7 @@
 torch>=2.0
 numpy
 scipy                 # RegularGridInterpolator, data pipeline
-scikit-learn          # input/output scalers embedded in the .pth checkpoints
+scikit-learn==1.5.1   # version used to fit scalers embedded in the checkpoints
 
 # --- geometry / meshes / DEM ---
 trimesh               # STL handling, signed wall distance, load integration

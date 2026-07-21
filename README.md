@@ -11,8 +11,17 @@ at about 0.5 m resolution. Two architectures are provided:
 - **3D U-Net cascade** — a full 3D grid network. Best at resolving the
   high-speed corridors between closely spaced structures.
 
-Both are trained on 292 idealised OpenFOAM domains with physics-informed losses
-(continuity and momentum residuals) added to a supervised objective.
+Both are trained on 292 idealised OpenFOAM domains with y-reflection data
+augmentation and physics-informed losses (continuity and turbulent-viscosity
+momentum residuals) added to a supervised objective.
+
+On the frozen 18-domain test set, the final checkpoints reach the following
+mean normalised RMSE values:
+
+| model | global U | global p | global p (gauge) | ROI U | ROI p | ROI p (gauge) |
+|---|---:|---:|---:|---:|---:|---:|
+| Hybrid | 0.157 | 0.247 | 0.202 | 0.169 | 0.122 | 0.089 |
+| 3D U-Net | 0.177 | 0.233 | 0.185 | 0.176 | 0.130 | 0.086 |
 
 > This is the public research code accompanying the PhD work of Jimmy Gasser
 > (EPFL, CRYOS). It is meant to reproduce the paper's results and to run the
@@ -43,6 +52,7 @@ pinnfluid/                 core package (training + inference stack)
   physics_grid.py          finite-difference operators for physics losses
   utils.py                 misc helpers (seeding, logging, optional wandb)
   main.py                  training entry point (see "Reproducing")
+  run_manifest.py          sequential Stage-1/Stage-2 YAML launcher
   domain_prep/             swisstopo DEM download, domain building
   input_prep/              OpenFOAM case export helpers
   vis/                     figure/report generation
@@ -87,19 +97,25 @@ feature list and the important security/deployment caveats.
 ## Reproducing the two final models
 
 The datasets are hosted separately (see [`DATA.md`](DATA.md)). Once the CFD
-data is placed under `data/cfd/` and the split is in `pinnfluid/splits/`:
+data is placed under `data/cfd/`, create the mirrored training root:
 
 ```bash
-cd pinnfluid
-# Stage-1 backgrounds
-python main.py --config configs/iter4_struct292_hybrid_cascade.yaml
-python main.py --config configs/iter4_struct292_unet_cascade.yaml
-# Stage-2 physics-informed refiners (both final models)
-python main.py --config configs/iter4_struct292_physics_stage2_extra.yaml
+python pinnfluid/input_prep/make_y_mirror_cfd.py \
+  --source-root data/cfd \
+  --output-root data/cfd_ymirror \
+  --split-json pinnfluid/splits/recommended_292domains_struct_al_full.json \
+  --output-split pinnfluid/splits/recommended_292domains_struct_al_full_ymirror.json
+
+# Each manifest trains Stage 1 and then its Stage-2 refiner.
+python pinnfluid/run_manifest.py \
+  --sweep-yaml pinnfluid/configs/final_hybrid_292_ymirror.yaml
+python pinnfluid/run_manifest.py \
+  --sweep-yaml pinnfluid/configs/final_grid_unet_292_ymirror.yaml
 ```
 
-Each checkpoint stores the exact config it was trained with, so inference and
-evaluation rebuild the network without needing the YAML.
+The mirrored copies are used only for training; validation and test retain the
+original cases. Each checkpoint stores its config and fitted scalers, so
+inference rebuilds the network without needing the YAML.
 
 ## Data and weights
 

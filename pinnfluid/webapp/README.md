@@ -22,8 +22,8 @@ fast on CPU; the 3D U-Net is much slower on CPU and is best run on a GPU.
 
 ## Models
 
-`inference.MODEL_REGISTRY` exposes the two final 292-domain physics-informed
-cascades:
+`inference.MODEL_REGISTRY` exposes the two final 292-domain, y-reflection
+augmented, physics-informed cascades:
 
 - **Hybrid (cascade, 292d, physics)** — default; fastest, CPU-friendly, best
   aggregate accuracy.
