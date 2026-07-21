@@ -1,0 +1,86 @@
+solid structure
+  facet normal 0 0 -1
+    outer loop
+      vertex -3 -3 0
+      vertex  3 -3 0
+      vertex  3  3 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex -3 -3 0
+      vertex  3  3 0
+      vertex -3  3 0
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -3 -3 7
+      vertex  3 -3 7
+      vertex  3  3 7
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -3 -3 7
+      vertex  3  3 7
+      vertex -3  3 7
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -3  3 0
+      vertex  3  3 0
+      vertex  3  3 7
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -3  3 0
+      vertex  3  3 7
+      vertex -3  3 7
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -3 -3 0
+      vertex  3 -3 0
+      vertex  3 -3 7
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -3 -3 0
+      vertex  3 -3 7
+      vertex -3 -3 7
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 3 -3 0
+      vertex 3  3 0
+      vertex 3  3 7
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 3 -3 0
+      vertex 3  3 7
+      vertex 3 -3 7
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -3 -3 0
+      vertex -3  3 0
+      vertex -3  3 7
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -3 -3 0
+      vertex -3  3 7
+      vertex -3 -3 7
+    endloop
+  endfacet
+endsolid structure

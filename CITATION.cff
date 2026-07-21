@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "pinnfluid: a physics-informed wind and pressure surrogate over terrain and structures"
+authors:
+  - family-names: Gasser
+    given-names: Jimmy
+    affiliation: "EPFL, CRYOS Laboratory"
+    email: jimmy.gasser@epfl.ch
+version: "0.1.0-beta"
+license: MIT
+repository-code: "https://github.com/<your-user>/pinnfluid"
+abstract: >
+  A steady-RANS surrogate that predicts the 3D wind and pressure field around
+  built structures embedded in real terrain. A two-stage cascade combines a
+  30 m background over the full domain with a 0.5 m refinement over the region
+  of interest, trained on 292 idealised OpenFOAM domains with physics-informed
+  (continuity and momentum) losses. Two architectures are provided: a hybrid
+  point-wise model and a 3D grid U-Net.
+keywords:
+  - physics-informed neural networks
+  - computational fluid dynamics
+  - surrogate model
+  - wind engineering
+  - terrain
+# TODO: add the paper reference under `preferred-citation:` once published.

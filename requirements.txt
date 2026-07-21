@@ -1,0 +1,28 @@
+# pinnfluid — training + web-app runtime dependencies.
+# Tested with Python 3.10+. A CPU-only PyTorch build is enough to run the
+# hybrid model; CUDA is used automatically when available.
+
+# --- core numerics / ML ---
+torch>=2.0
+numpy
+scipy                 # RegularGridInterpolator, data pipeline
+scikit-learn          # input/output scalers embedded in the .pth checkpoints
+
+# --- geometry / meshes / DEM ---
+trimesh               # STL handling, signed wall distance, load integration
+numpy-stl             # STL read/write in the DEM + structure-placement scripts
+pyvista               # mesh + volume export (input_prep, VTK export)
+rasterio              # DEM merge/crop, custom GeoTIFF import
+pyproj                # WGS84 <-> LV95 coordinate transforms
+requests              # swisstopo STAC tile download
+
+# --- plotting / reports / 3D viewers ---
+matplotlib
+Pillow
+plotly                # interactive 3D viewers (HTML; plotly.js from CDN)
+
+# --- config ---
+PyYAML                # YAML config overrides in the training stack
+
+# --- optional: experiment tracking (training only, off by default) ---
+# wandb               # uncomment + set WANDB_ENABLED=True to log training runs

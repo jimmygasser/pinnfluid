@@ -1,0 +1,32 @@
+# --- Model weights (fetched from the model release, not tracked in git) ---
+pinnfluid/webapp/checkpoints/*.pth
+pinnfluid/webapp/checkpoints/*.pt
+
+# --- Datasets (hosted on the data repository, not tracked in git) ---
+data/
+dem/
+
+# --- Web-app runtime output ---
+pinnfluid/webapp/results/
+pinnfluid/webapp/workspace/
+pinnfluid/webapp/**/results/
+
+# --- Training runs / logs ---
+results/
+wandb/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

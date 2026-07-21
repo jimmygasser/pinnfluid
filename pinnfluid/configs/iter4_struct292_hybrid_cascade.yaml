@@ -1,0 +1,83 @@
+name: iter4_struct292_hybrid_cascade
+
+base:
+  split_json: scripts/splits/recommended_292domains_struct_al_full.json
+  device: cuda
+  epochs: 500
+  mode: pinn
+  scheduler: onecycle
+  amp: false
+  resume: true
+  wandb_project: pinn_terr_struc
+  wandb_tags: iter4,struct292,hybrid_cascade,pinn
+  plot_eval: true
+  train_loss: charb_weighted
+  momentum_loss_mode: constant
+
+runs:
+  - id: pot2_292_globalrf_fulldomainrf
+    experiment_name: sweep/iter4_struct292/pot2_292_globalrf_fulldomainrf
+    model: hybrid
+    train_struc_mode: none
+    train_struc_weight: 0.0
+    overrides:
+      MIN_EPOCH_FOR_BEST: 100
+      EARLY_STOPPING_PATIENCE: 80
+      W_DATA_ROI: 2.0
+      SUP_WEIGHT_NEAR_STRUCTURE_GAIN: 0.5
+      SUP_WEIGHT_WAKE_GAIN: 0.5
+      GLOBAL_DATA_P_WEIGHT: 1.0
+      ROI_DATA_P_WEIGHT: 1.0
+      GLOBAL_ENCODER_DEPTH: 5
+      GLOBAL_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
+
+  - id: cascade_stage2_292_hybridbg_targeted_structrf_roirf
+    experiment_name: sweep/iter4_struct292/cascade_stage2_292_hybridbg_targeted_structrf_roirf
+    model: cascade
+    train_struc_mode: grad
+    train_struc_weight: 0.10
+    cascade_stage1_checkpoint: results/sweep/iter4_struct292/pot2_292_globalrf_fulldomainrf/checkpoints/best.pth
+    overrides:
+      CASCADE_STAGE: stage2
+      CASCADE_ZERO_INIT_HEAD: true
+      STRUCTURE_ENCODER_INPUT_MODE: context_v2
+      GLOBAL_ENCODER_DEPTH: 5
+      GLOBAL_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
+      MIN_EPOCH_FOR_BEST: 40
+      EARLY_STOPPING_PATIENCE: 50
+      CASCADE_EDGE_WEIGHT: 0.25
+      CASCADE_EDGE_BAND_XY_M: 15.0
+      CASCADE_EDGE_BAND_Z_M: 10.0
+      ROI_POINTS_PER_DOMAIN: 16384
+      ROI_PATCHES_PER_DOMAIN: 4
+      ROI_SUPERVISED_SAMPLER_MODE: targeted_v1
+      ROI_TARGET_VERY_NEAR_WALL_FRAC: 0.20
+      ROI_TARGET_NEAR_WALL_FRAC: 0.25
+      ROI_TARGET_GEOM_WAKE_FRAC: 0.25
+      ROI_TARGET_LOW_SPEED_FRAC: 0.20
+      ROI_TARGET_RANDOM_FRAC: 0.10
+      ROI_TARGET_VERY_NEAR_WALL_DMAX: 1.0
+      ROI_TARGET_VERY_NEAR_WALL_MAX_REPEAT: 4
+      ROI_TARGET_NEAR_WALL_DMAX: 5.0
+      ROI_TARGET_NEAR_WALL_BACKFILL_DMAX: 10.0
+      ROI_TARGET_WAKE_MIN_CONTEXT: 0.15
+      ROI_TARGET_WAKE_ZREL_MAX: 30.0
+      ROI_TARGET_LOW_SPEED_RATIO_MAX: 0.75
+      ROI_TARGET_LOW_SPEED_ZREL_MAX: 30.0
+      ROI_TARGET_MAX_ABOVE_STRUCTURE_H: 2.0
+      STRUCTURE_ENCODER_DEPTH: 5
+      STRUCTURE_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
+      ROI_ENCODER_DEPTH: 5
+      ROI_ENCODER_DILATIONS: [1, 2, 4, 8, 16, 32]
+      W_DATA_ROI: 5.0
+      W_PHYS_ROI: 0.0
+      W_DIV_ROI: 0.0
+      W_MOM_ROI: 0.0
+      W_BC_WALL_ROI: 0.0
+      ROI_DATA_P_WEIGHT: 3.0
+      SUP_WEIGHT_NEAR_STRUCTURE_GAIN: 3.0
+      SUP_WEIGHT_NEAR_STRUCTURE_DMAX: 2.0
+      SUP_WEIGHT_WAKE_GAIN: 3.0
+      SUP_WEIGHT_WAKE_ZREL_MAX: 30.0
+      SUP_WEIGHT_WAKE_SPEED_RATIO_MAX: 0.75
+      LR: 3.0e-5

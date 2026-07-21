@@ -1,0 +1,8 @@
+ABL inflow conditions used in the dataset
+-----------------------------------------
+Uref : 5 - 15 m/s   reference wind speed at Zref (varied per case)
+Zref : 20 m         reference height (fixed across the dataset)
+z0   : 0.1 m        aerodynamic roughness length (fixed across the dataset)
+
+Wind direction is varied per case. Values above were read back from the
+per-case meta.json ABL fields across the 302 CFD cases.

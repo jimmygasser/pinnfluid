@@ -1,0 +1,78 @@
+name: iter4_struct292_unet_cascade
+
+base:
+  split_json: scripts/splits/recommended_292domains_struct_al_full.json
+  device: cuda
+  epochs: 500
+  mode: pinn
+  scheduler: onecycle
+  amp: false
+  resume: true
+  wandb_project: pinn_terr_struc
+  wandb_tags: iter4,struct292,unet_cascade,pinn
+  plot_eval: true
+  train_loss: charb_weighted
+  momentum_loss_mode: constant
+
+runs:
+  - id: grid_unet_292_fulldomain_context
+    experiment_name: sweep/iter4_struct292/grid_unet_292_fulldomain_context
+    model: grid_unet
+    train_struc_mode: grad
+    train_struc_weight: 0.05
+    overrides:
+      W_DATA_ROI: 2.0
+      GRID_UNET_BASE_WIDTH: 32
+      GRID_UNET_LEVELS: 4
+      GRID_UNET_DROPOUT: 0.0
+      GRID_UNET_ROI_STRUCTURE_MODE: context_v2
+      GRID_UNET_USE_TERRAIN_CONTEXT: true
+      GRID_UNET_TERRAIN_CONTEXT_WIDTH: 32
+      GRID_UNET_TERRAIN_CONTEXT_DEPTH: 5
+      GRID_UNET_TERRAIN_CONTEXT_DILATIONS: [1, 2, 4, 8, 16, 32]
+      GLOBAL_PATCH_SHAPE: [32, 32, 16]
+      GLOBAL_POINTS_PER_DOMAIN: 65536
+      GLOBAL_PATCHES_PER_DOMAIN: 4
+
+  - id: cascade_stage2_292_gridbg_unetrefiner_v1_lr1e4
+    experiment_name: sweep/iter4_struct292/cascade_stage2_292_gridbg_unetrefiner_v1_lr1e4
+    model: cascade
+    train_struc_mode: grad
+    train_struc_weight: 0.10
+    cascade_stage1_checkpoint: results/sweep/iter4_struct292/grid_unet_292_fulldomain_context/checkpoints/best.pth
+    overrides:
+      CASCADE_STAGE: stage2
+      CASCADE_STAGE2_REFINER_KIND: grid_unet
+      CASCADE_ZERO_INIT_HEAD: true
+      GRID_UNET_BASE_WIDTH: 32
+      GRID_UNET_LEVELS: 4
+      GRID_UNET_DROPOUT: 0.0
+      GRID_UNET_ROI_STRUCTURE_MODE: context_v3
+      GRID_UNET_USE_TERRAIN_CONTEXT: true
+      GRID_UNET_TERRAIN_CONTEXT_WIDTH: 32
+      GRID_UNET_TERRAIN_CONTEXT_DEPTH: 5
+      GRID_UNET_TERRAIN_CONTEXT_DILATIONS: [1, 2, 4, 8, 16, 32]
+      CASCADE_STAGE2_GRID_MAX_ROI_CELLS: 10000000
+      GLOBAL_PATCH_SHAPE: [32, 32, 16]
+      ROI_PATCH_SHAPE: [32, 32, 16]
+      ROI_PATCHES_PER_DOMAIN: 4
+      PATCH_NEAR_GROUND_PROB: 0.75
+      MIN_EPOCH_FOR_BEST: 40
+      EARLY_STOPPING_PATIENCE: 50
+      CASCADE_EDGE_WEIGHT: 0.25
+      CASCADE_EDGE_BAND_XY_M: 15.0
+      CASCADE_EDGE_BAND_Z_M: 10.0
+      CASCADE_STAGE2_MS_REPEAT_ENABLED: false
+      W_DATA_ROI: 5.0
+      W_PHYS_ROI: 0.0
+      W_DIV_ROI: 0.0
+      W_MOM_ROI: 0.0
+      W_BC_WALL_ROI: 0.0
+      ROI_DATA_P_WEIGHT: 3.0
+      SUP_WEIGHT_NEAR_STRUCTURE_GAIN: 3.0
+      SUP_WEIGHT_NEAR_STRUCTURE_DMAX: 2.0
+      SUP_WEIGHT_WAKE_GAIN: 3.0
+      SUP_WEIGHT_WAKE_ZREL_MAX: 30.0
+      SUP_WEIGHT_WAKE_SPEED_RATIO_MAX: 0.75
+      SUP_WEIGHT_WAKE_POWER: 2.0
+      LR: 1.0e-4

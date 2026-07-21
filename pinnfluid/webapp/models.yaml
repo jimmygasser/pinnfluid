@@ -1,0 +1,16 @@
+# Which models the web app offers, per deployment. Optional file: if it is
+# absent, every model whose checkpoints are present is offered.
+#
+# The env var PINN_WEBAPP_MODELS (comma-separated ids) overrides this file, e.g.
+#   PINN_WEBAPP_MODELS=hybrid-cascade-292d-pinn python app.py
+# serves only the fast hybrid, which is the sensible choice on a CPU-only host
+# (the 3D U-Net is slow without a GPU).
+
+# List the model ids to offer. Comment out one line to hide it.
+enabled:
+  - hybrid-cascade-292d-pinn         # hybrid cascade (fast, CPU-friendly)
+  - grid-unet-cascade-292d-pinn      # 3D U-Net cascade (accurate, needs a GPU to be fast)
+
+# Which one is selected by default in the UI. Must be one of `enabled`.
+# Default to the fast hybrid; the U-Net is the accurate but slower option.
+default: hybrid-cascade-292d-pinn
