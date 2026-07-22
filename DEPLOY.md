@@ -38,7 +38,7 @@ docker run --rm --name pinnfluid-web-gpu \
 Open <http://localhost:8080>. Verify the runtime in another terminal:
 
 ```bash
-curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/status
 ```
 
 The JSON must contain `"resolved": "cuda"`, `"cuda_available": true`, both
@@ -78,7 +78,7 @@ Cloud Build uses `cloudbuild.gpu.yaml`, which explicitly selects
 `Dockerfile.gpu`:
 
 ```bash
-TAG=0.1.0
+TAG=0.1.0-beta
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/web:$TAG"
 
 gcloud builds submit \
@@ -106,7 +106,7 @@ gcloud run deploy "$SERVICE" \
   --max-instances 1 \
   --min-instances 0 \
   --no-cpu-throttling \
-  --set-env-vars "^@^PINN_DEVICE=cuda@PINN_WEBAPP_HOST=0.0.0.0@PINN_WEBAPP_MODELS=hybrid-cascade-292d-pinn,grid-unet-cascade-292d-pinn@PINN_WEBAPP_GITHUB_URL=https://github.com/jimmygasser/pinnfluid@PINN_WEBAPP_RESULTS_DIR=/tmp/pinnfluid-results@PINN_WEBAPP_MAX_RUNS=5@PINN_WEBAPP_MAX_GB=1@PINN_WEBAPP_MAX_ACTIVE_JOBS=1@PINN_WEBAPP_RATE_LIMIT_JOBS=4@PINN_WEBAPP_RATE_LIMIT_WINDOW=3600@PINN_WEBAPP_TORCH_THREADS=4@OMP_NUM_THREADS=4@MKL_NUM_THREADS=4@OPENBLAS_NUM_THREADS=4@NUMEXPR_NUM_THREADS=4"
+  --set-env-vars "^@^PINN_DEVICE=cuda@PINN_WEBAPP_HOST=0.0.0.0@PINN_WEBAPP_MODELS=hybrid-cascade-292d-pinn,grid-unet-cascade-292d-pinn@PINN_WEBAPP_GITHUB_URL=https://github.com/jimmygasser/pinnfluid@PINN_WEBAPP_RESULTS_DIR=/tmp/pinnfluid-results@PINN_WEBAPP_MAX_RUNS=5@PINN_WEBAPP_MAX_GB=1@PINN_WEBAPP_MAX_ACTIVE_JOBS=1@PINN_WEBAPP_RATE_LIMIT_JOBS=4@PINN_WEBAPP_RATE_LIMIT_PREP=12@PINN_WEBAPP_RATE_LIMIT_WINDOW=3600@PINN_WEBAPP_MAX_ROSE_SECTORS=8@PINN_WEBAPP_MAX_REQUEST_MB=32@PINN_WEBAPP_MAX_UPLOAD_MB=20@PINN_WEBAPP_MAX_DOMAIN_M=3000@PINN_WEBAPP_MAX_SINGLE_STRUCTURES=10@PINN_WEBAPP_ENABLE_RUN_INDEX=0@PINN_WEBAPP_TORCH_THREADS=4@OMP_NUM_THREADS=4@MKL_NUM_THREADS=4@OPENBLAS_NUM_THREADS=4@NUMEXPR_NUM_THREADS=4"
 ```
 
 `--no-cpu-throttling` is required by the current background-thread job model.
@@ -123,7 +123,7 @@ Proxy the private service to a local port:
 gcloud run services proxy "$SERVICE" --region "$REGION" --port 8085
 ```
 
-Open <http://localhost:8085>, check `/healthz`, and complete one Hybrid and one
+Open <http://localhost:8085>, check `/status`, and complete one Hybrid and one
 U-Net prediction. Inspect Cloud Run logs if either fails:
 
 ```bash
@@ -151,14 +151,17 @@ Three different controls are involved:
 
 - **Cloud Run:** `min-instances=0` and `max-instances=1` control allocated
   instances. They do not impose a monthly spending ceiling.
-- **Application:** one heavy job at a time and four submissions per hour are
-  enforced in-process by `PINN_WEBAPP_MAX_ACTIVE_JOBS` and
-  `PINN_WEBAPP_RATE_LIMIT_*`. The counter resets on scale-down; this is a
-  practical beta guard, not DDoS protection.
+- **Application:** one terrain or prediction operation at a time, four
+  prediction submissions per hour, twelve terrain/input operations per hour,
+  and at most eight wind-rose sectors are enforced in-process. Request, upload,
+  domain and structure-count limits are enforced server-side. Counters reset on
+  scale-down; these are practical beta guards, not DDoS protection.
 - **Cloud Billing:** create a project budget and email alerts in
   **Billing > Budgets & alerts**. Start with a small monthly budget such as
   USD/CHF 10 and alerts at 50%, 90%, and 100%. A budget alert notifies you; it
-  does not automatically stop the service.
+  does not automatically stop the service. Google Cloud budgets are alerts,
+  not hard spending caps. A strict monetary shutdown requires budget Pub/Sub
+  automation or manually disabling the service when an alert is received.
 
 To adjust the public limit later:
 

@@ -1,6 +1,7 @@
 # --- Model weights (fetched from the model release, not tracked in git) ---
 pinnfluid/webapp/checkpoints/*.pth
 pinnfluid/webapp/checkpoints/*.pt
+pinnfluid/webapp/checkpoints/*.part
 
 # --- Datasets (hosted on the data repository, not tracked in git) ---
 data/

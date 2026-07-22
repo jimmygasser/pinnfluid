@@ -1,11 +1,11 @@
-"""Local web app for running the pretrained model on a user-selected domain.
+"""Interactive app for running pinnfluid on a user-selected domain.
 
 Three-step UX (mirrors the vocabulary the user thinks in):
     1. Confirm terrain         → /download_dem (swisstopo tiles → cropped DEM)
     2. Confirm structure(s)    → /build_inputs (STLs + terrain.npz + flow.npz)
     3. Predict flow field      → /predict     (inference + plots + cleanup)
 
-Plots land as individual PNGs in scripts/predict_web/results/<domain>/plots/
+Plots land as individual PNGs in webapp/results/<domain>/plots/
 and are also streamed inline to the browser for preview + per-file download.
 A separate zip endpoint bundles all of them.
 """
@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import argparse
 import base64 as _b64
+import binascii
+import copy
 import hashlib
 import html as _html
 import http.server
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -28,6 +31,7 @@ import traceback
 import uuid
 import webbrowser
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -40,10 +44,9 @@ ROOT = SCRIPTS_DIR.parent
 RESULTS_DIR = Path(os.environ.get(
     "PINN_WEBAPP_RESULTS_DIR", Path(__file__).resolve().parent / "results"))
 
-# Shown as the "About / GitHub" link in the app header. Set the real repo URL
-# here or via the PINN_WEBAPP_GITHUB_URL env var before deploying.
+# Public repository linked from the app header; deployments may override it.
 GITHUB_URL = os.environ.get(
-    "PINN_WEBAPP_GITHUB_URL", "https://github.com/your-user/pinnfluid"
+    "PINN_WEBAPP_GITHUB_URL", "https://github.com/jimmygasser/pinnfluid"
 )
 
 for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_prep"):
@@ -133,6 +136,8 @@ _JOBS_LOCK = threading.Lock()
 # over the GPU / workspace dirs.
 _PREDICT_GATE = threading.Semaphore(1)
 _JOB_SUBMISSIONS: list[float] = []
+_PREP_SUBMISSIONS: list[float] = []
+_PREP_ACTIVE = 0
 
 
 def _env_nonnegative_int(name: str, default: int = 0) -> int:
@@ -140,6 +145,136 @@ def _env_nonnegative_int(name: str, default: int = 0) -> int:
         return max(0, int(os.environ.get(name, str(default))))
     except (TypeError, ValueError):
         return max(0, default)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_mebibytes(name: str, default: int) -> int:
+    return max(1, _env_nonnegative_int(name, default)) * 1024 * 1024
+
+
+def _active_jobs_locked() -> int:
+    return sum(j.get("state") in ("queued", "running") for j in _JOBS.values())
+
+
+def _prep_admit() -> tuple[bool, str, int]:
+    """Reserve one synchronous terrain/input-preparation operation."""
+    global _PREP_ACTIVE
+    max_active = _env_nonnegative_int("PINN_WEBAPP_MAX_ACTIVE_JOBS", 0)
+    rate_ops = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_PREP", 0)
+    window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
+    now = time.time()
+    with _JOBS_LOCK:
+        if max_active and _active_jobs_locked() + _PREP_ACTIVE >= max_active:
+            return False, "Another terrain or prediction operation is already running.", 30
+        if rate_ops and window:
+            cutoff = now - window
+            _PREP_SUBMISSIONS[:] = [t for t in _PREP_SUBMISSIONS if t >= cutoff]
+            if len(_PREP_SUBMISSIONS) >= rate_ops:
+                retry_after = max(1, int(_PREP_SUBMISSIONS[0] + window - now) + 1)
+                return False, "The public terrain-processing limit has been reached. Try again later.", retry_after
+            _PREP_SUBMISSIONS.append(now)
+        _PREP_ACTIVE += 1
+    return True, "", 0
+
+
+def _prep_release() -> None:
+    global _PREP_ACTIVE
+    with _JOBS_LOCK:
+        _PREP_ACTIVE = max(0, _PREP_ACTIVE - 1)
+
+
+def _validate_compute_request(body: dict) -> None:
+    """Enforce public-app bounds even when browser validation is bypassed."""
+    def bounded(name: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(body.get(name, default))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be numeric") from exc
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+        return value
+
+    try:
+        domain_size = int(body.get("domain_size", 1000))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("domain_size must be numeric") from exc
+    if domain_size not in {500, 1000, 2000, 3000}:
+        raise ValueError("domain_size must be one of 500, 1000, 2000 or 3000 m")
+    bounded("wind_from", 270.0, 0.0, 360.0)
+    bounded("uref", 10.0, 1.0, 30.0)
+    bounded("zref", 20.0, 5.0, 100.0)
+    bounded("z0", 0.1, 0.001, 2.0)
+    if body.get("z_top_offset") is not None:
+        bounded("z_top_offset", 300.0, 50.0, 1000.0)
+
+    structures = body.get("structures") or []
+    max_single = _env_nonnegative_int("PINN_WEBAPP_MAX_SINGLE_STRUCTURES", 10)
+    if not isinstance(structures, list):
+        raise ValueError("structures must be a list")
+    if max_single and len(structures) > max_single:
+        raise ValueError(f"at most {max_single} individual structures are allowed")
+    for structure in structures:
+        if not isinstance(structure, dict):
+            raise ValueError("each structure must be an object")
+        try:
+            yaw = float(structure.get("yaw", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("structure yaw must be numeric") from exc
+        if not math.isfinite(yaw):
+            raise ValueError("structure yaw must be finite")
+
+    sampling_points = body.get("sampling_points") or []
+    if not isinstance(sampling_points, list) or len(sampling_points) > 10:
+        raise ValueError("at most 10 sampling points are allowed")
+
+    grid = body.get("grid")
+    if grid is not None:
+        if not isinstance(grid, dict):
+            raise ValueError("grid must be an object")
+        try:
+            rows = int(grid.get("rows", 0))
+            cols = int(grid.get("cols", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("grid dimensions must be integers") from exc
+        if not (1 <= rows <= 10 and 1 <= cols <= 10):
+            raise ValueError("structure grids are limited to 10 x 10")
+        for key in ("spacing_x", "spacing_y"):
+            try:
+                spacing = float(grid.get(key, 3.0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("grid spacing must be numeric") from exc
+            if not math.isfinite(spacing) or not 1.0 <= spacing <= 20.0:
+                raise ValueError("grid spacing must be between 1 and 20 m")
+        for key in ("grid_yaw", "struct_yaw"):
+            try:
+                yaw = float(grid.get(key, 0.0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("grid yaw values must be numeric") from exc
+            if not math.isfinite(yaw):
+                raise ValueError("grid yaw values must be finite")
+
+
+def _validate_dem_bounds(body: dict) -> tuple[float, float, float, float]:
+    west = float(body["west"])
+    south = float(body["south"])
+    east = float(body["east"])
+    north = float(body["north"])
+    vals = (west, south, east, north)
+    if not all(math.isfinite(v) for v in vals):
+        raise ValueError("DEM bounds must be finite")
+    if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+        raise ValueError("invalid WGS84 DEM bounds")
+    e_min, n_min, e_max, n_max = wgs84_to_lv95(west, south, east, north)
+    max_extent = float(_env_nonnegative_int("PINN_WEBAPP_MAX_DOMAIN_M", 3000)) + 5.0
+    if e_max - e_min > max_extent or n_max - n_min > max_extent:
+        raise ValueError(f"DEM extent exceeds the {max_extent - 5:.0f} m public limit")
+    return west, south, east, north
 
 
 def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
@@ -154,7 +289,7 @@ def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
     window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
     now = time.time()
     with _JOBS_LOCK:
-        active = sum(j.get("state") in ("queued", "running") for j in _JOBS.values())
+        active = _active_jobs_locked() + _PREP_ACTIVE
         if max_active and active >= max_active:
             return None, "A prediction is already running. Try again when it finishes.", 30
 
@@ -165,7 +300,8 @@ def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
                 retry_after = max(1, int(_JOB_SUBMISSIONS[0] + window - now) + 1)
                 return None, "The public prediction limit has been reached. Try again later.", retry_after
 
-        _JOB_SUBMISSIONS.append(now)
+        if rate_jobs and window:
+            _JOB_SUBMISSIONS.append(now)
         jid = uuid.uuid4().hex[:12]
         _JOBS[jid] = {
             "id": jid, "kind": kind, "state": "queued",
@@ -236,17 +372,28 @@ def _companion_model_id(primary_id: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 def _build_html() -> str:
     html = BUILDER_HTML
-    html = html.replace("Domain Builder — pinn_terr_struc", "Predict — pinn_terr_struc")
+    html = html.replace(
+        "Domain Builder — pinn_terr_struc",
+        "pinnfluid - Wind and pressure prediction",
+    )
     _info_link = (
         f'<a href="{_html.escape(GITHUB_URL)}" target="_blank" rel="noopener" '
         'title="Source code, documentation and models on GitHub" '
         'style="font-size:13px; font-weight:normal; text-decoration:none; '
-        'vertical-align:middle; margin-left:10px; color:#0d47a1;">'
+        'vertical-align:middle; margin-left:10px; color:#fff; opacity:0.9;">'
         '&#9432; About / GitHub</a>'
     )
     html = html.replace(
         "<h2>Domain Builder</h2>",
-        f"<h2>Predict flow{_info_link}</h2>", 1,
+        f"<h2>pinnfluid{_info_link}</h2>", 1,
+    )
+    html = html.replace(
+        "Terrain + structure domain creation for pinn_terr_struc",
+        "Interactive wind and pressure prediction over complex terrain and structures.<br>"
+        "Found a bug or need another structure or feature? "
+        '<a href="mailto:jimmy.gasser@epfl.ch" style="color:#fff;">'
+        "jimmy.gasser@epfl.ch</a>",
+        1,
     )
 
     # Step 1: rename the DEM button.
@@ -363,6 +510,20 @@ def _model_picker_html() -> str:
 
 def _extra_controls_html() -> str:
     """Uncertainty + wind-rose options, injected just above the Predict button."""
+    max_sectors = max(2, _env_nonnegative_int("PINN_WEBAPP_MAX_ROSE_SECTORS", 16))
+    sector_options = [n for n in (4, 8, 12, 16) if n <= max_sectors]
+    if not sector_options:
+        sector_options = [max_sectors]
+    sector_html = "".join(
+        f'<option{" selected" if n == min(8, max(sector_options)) else ""}>{n}</option>'
+        for n in sector_options
+    )
+    past_runs = (
+        '      <div style="margin-top:8px;"><a href="/runs" target="_blank" '
+        'style="font-size:12px;">Past runs</a></div>\n'
+        if _env_flag("PINN_WEBAPP_ENABLE_RUN_INDEX", False)
+        else ""
+    )
     return (
         '<div class="field" style="margin-bottom:10px;">\n'
         '      <label style="display:flex;gap:6px;align-items:center;cursor:pointer;">'
@@ -375,7 +536,7 @@ def _extra_controls_html() -> str:
         '      <div id="roseOpts" style="display:none;margin-top:6px;padding-left:22px;">\n'
         '        <label for="roseSectors">Sectors</label>\n'
         '        <select id="roseSectors" style="width:90px;padding:5px;border-radius:6px;border:1px solid #ccc;">\n'
-        '          <option>4</option><option selected>8</option><option>12</option><option>16</option>\n'
+        f'          {sector_html}\n'
         '        </select>\n'
         '        <label for="roseDirs" style="margin-top:6px;">Custom directions '
         '(&deg; wind-from, comma-separated &mdash; overrides sectors)</label>\n'
@@ -385,10 +546,14 @@ def _extra_controls_html() -> str:
         '        <div class="help">One full prediction per direction — expect minutes '
         '(structure grids: much longer). Full artifacts (plots, PDF, 3D, exports) '
         'are kept for every direction (~50–100 MB each); a combined '
-        'multi-direction PDF and 3D direction selectors are produced at the end.</div>\n'
+        'multi-direction PDF and 3D direction selectors are produced at the end. '
+        '<b>Structures remain fixed as placed for the Step 1 wind direction; only '
+        'the inflow direction changes.</b> Evenly spaced sectors start at the Step 1 '
+        'direction. With custom directions, the first valid direction is marked '
+        'governing. With evenly spaced sectors, the direction with the highest '
+        'near-ground wind speed is governing.</div>\n'
         '      </div>\n'
-        '      <div style="margin-top:8px;"><a href="/runs" target="_blank" '
-        'style="font-size:12px;">📚 Past runs</a></div>\n'
+        + past_runs +
         '    </div>'
     )
 
@@ -583,9 +748,9 @@ function renderStats(stats, payload) {
       // formatted table; here we show a compact inline version.
       var forces = r.per_structure_forces || [];
       if (forces.length > 0) {
-        html += '<h4 style="margin:10px 0 4px 0; color:#37474f; font-size:13px;">Estimated wind loads (' + forces.length + ' structure' + (forces.length>1?'s':'') + ')</h4>';
+        html += '<h4 style="margin:10px 0 4px 0; color:#37474f; font-size:13px;">Experimental wind-load estimates (' + forces.length + ' structure' + (forces.length>1?'s':'') + ')</h4>';
         html += '<table>';
-        html += '<tr><th style="width:36px;">#</th><th style="width:90px;">Fx [N]</th><th style="width:90px;">Fy [N]</th><th style="width:90px;">Fz [N]</th><th style="width:90px;">|F_drag| [N]</th><th style="width:80px;">Cd</th><th>Frontal A [m²]</th></tr>';
+        html += '<tr><th style="width:36px;">#</th><th style="width:90px;">Fx local [N]</th><th style="width:90px;">Fy local [N]</th><th style="width:90px;">Fz [N]</th><th style="width:90px;">|F_drag| [N]</th><th style="width:80px;">Cd</th><th>Frontal A [m²]</th></tr>';
         var _fmt = function(v, digits) {
           return (v != null && isFinite(v)) ? Number(v).toFixed(digits) : '—';
         };
@@ -609,7 +774,9 @@ function renderStats(stats, payload) {
         var rhoStr = (air.rho_kg_m3 ? air.rho_kg_m3.toFixed(3) : '1.225');
         html += '<div style="font-size:11px; color:#888; margin-top:4px;">'
               + meth + ' Cd = F<sub>drag</sub> / (½·ρ·U<sub>ref</sub>²·A<sub>frontal</sub>). '
-              + 'Forces use ρ = ' + rhoStr + ' kg/m³ (ISA at site elevation).</div>';
+              + 'Fx/Fy use the wind-aligned frame for the current direction. Forces use ρ = '
+              + rhoStr + ' kg/m³ (ISA at site elevation). Experimental pressure-only screening estimate; '
+              + 'not a validated design load.</div>';
       }
     });
   }
@@ -885,6 +1052,9 @@ function renderRose(payload) {
   lines.push('Domain: <b>'+domain+'</b>');
   lines.push('Wind rose: '+ (payload.sectors||[]).length + ' sectors');
   lines.push('Model: <code>'+(payload.model_name||'')+'</code>');
+  if (payload.geometry_reference_dir_deg != null) {
+    lines.push('Fixed-layout reference: '+payload.geometry_reference_dir_deg.toFixed(0)+'°');
+  }
   if (payload.elapsed_s != null) lines.push('Total time: '+payload.elapsed_s.toFixed(1)+' s');
   meta.innerHTML = lines.join(' &nbsp;·&nbsp; ');
 
@@ -894,7 +1064,7 @@ function renderRose(payload) {
   document.getElementById('dlVtkBtn').href   = '/download_vtk?domain=' + encodeURIComponent(worst);
   document.getElementById('dlNpzBtn').href   = '/download_npz?domain=' + encodeURIComponent(worst);
   document.getElementById('dlPlotsBtn').href = '/download_zip?domain=' + encodeURIComponent(worst);
-  document.getElementById('mapBtn').href = '/map?domain=' + encodeURIComponent(worst);
+  document.getElementById('mapBtn').href = '/map_rose?domain=' + encodeURIComponent(domain);
   document.getElementById('view3dBtn').href  = '/view_3d_rose?domain=' + encodeURIComponent(domain);
   var strBtn = document.getElementById('view3dStrBtn');
   strBtn.href = '/view_3d_structure_rose?domain=' + encodeURIComponent(domain);
@@ -904,12 +1074,17 @@ function renderRose(payload) {
   if (payload.rose_png_base64) {
     html += '<div style="margin:8px 0 16px 0;"><img style="max-width:720px;width:100%;border:1px solid #ddd;border-radius:4px;" src="data:image/png;base64,' + payload.rose_png_base64 + '"></div>';
   }
+  html += '<div style="margin:6px 0 12px;padding:8px 10px;background:#eef5fb;border-left:3px solid #1976d2;font-size:12px;">'
+       + 'The terrain frame is rotated for each inflow, but all structures retain the physical orientation shown for the Step 1 wind direction ('
+       + (payload.geometry_reference_dir_deg != null ? payload.geometry_reference_dir_deg.toFixed(0)+'°' : 'reference') + '). '
+       + (payload.governing_rule || '') + '</div>';
   html += '<h3>Per-sector summary</h3>';
-  html += '<table><tr><th>Wind from [°]</th><th>Max |U| near ground [m/s]</th><th>Mean |U| at Z<sub>ref</sub> [m/s]</th><th>Max |F<sub>drag</sub>| [N]</th><th>Max suction [Pa]</th><th></th></tr>';
+  html += '<table><tr><th>Wind from [°]</th><th>Max |U| near ground [m/s]</th><th>Mean |U| at Z<sub>ref</sub> [m/s]</th><th>Max experimental |F<sub>drag</sub>| [N]</th><th>Max suction [Pa]</th><th></th></tr>';
   (payload.sectors || []).forEach(function(s) {
     var isWorst = (s.domain === worst);
     var dq = encodeURIComponent(s.domain);
     var links = '<a href="/download_pdf?domain='+dq+'" target="_blank">PDF</a> · '
+              + '<a href="/map?domain='+dq+'" target="_blank">map</a> · '
               + '<a href="/view_3d?domain='+dq+'" target="_blank">3D</a> · '
               + '<a href="/download_zip?domain='+dq+'">plots</a>'
               + (isWorst ? ' <b style="color:#e65100;">governing</b>' : '');
@@ -925,6 +1100,12 @@ function renderRose(payload) {
   html += '</table>';
   html += '<div style="font-size:11px;color:#888;margin-top:6px;">Full artifacts are kept for every direction (~50–100 MB each). The PDF button above is the combined multi-direction report; per-direction PDFs are in the table. The rose summary JSON is in the results folder.</div>';
   statsDiv.innerHTML = html;
+  statsDiv.style.display = 'block';
+  document.querySelector('#predict-values-toggle button').innerHTML = 'Hide summary values ▴';
+  var mapFrame = document.getElementById('predict-map');
+  mapFrame.removeAttribute('src');
+  mapFrame.style.display = 'none';
+  document.getElementById('predict-map-hint').style.display = 'none';
   renderPlotsSection(payload, plots);
   plots.style.display = 'none';
   document.querySelector('#predict-plot-toggle button').innerHTML = 'Show plots ▾';
@@ -1470,16 +1651,22 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
 
 
 def _sector_score(rec: dict) -> float:
-    """Governing-sector ranking: max structure drag if any, else near-ground wind."""
-    if rec.get("max_drag_N") is not None:
-        return abs(float(rec["max_drag_N"]))
+    """Governing-sector ranking for automatic roses: near-ground wind speed."""
     return float(rec.get("max_u_near_ground") or 0.0)
+
+
+def _select_governing_sector(records: list[dict], *, custom_directions: bool) -> dict:
+    if not records:
+        raise ValueError("cannot select a governing sector from an empty list")
+    if custom_directions:
+        return records[0]
+    return max(records, key=_sector_score)
 
 
 def _rose_figure(records: list, *, worst_domain: str) -> bytes:
     """Polar wind-rose, met. convention (N up, clockwise). Bar length AND
-    colour = max near-ground wind per direction; the governing (worst-load)
-    direction is outlined."""
+    colour = max near-ground wind per direction; the governing direction is
+    outlined."""
     import math
     import matplotlib
     matplotlib.use("Agg")
@@ -1528,7 +1715,7 @@ def _rose_figure(records: list, *, worst_domain: str) -> bytes:
     ax.tick_params(axis="y", labelsize=9)
     ax.grid(alpha=0.4)
     ax.set_title("Max near-ground wind speed by wind direction [m/s]\n"
-                 "(ring labels in m/s; black outline = governing direction by load)",
+                 "(ring labels in m/s; black outline = governing direction)",
                  fontsize=11)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
@@ -1536,29 +1723,84 @@ def _rose_figure(records: list, *, worst_domain: str) -> bytes:
     return buf.getvalue()
 
 
-def _parse_rose_directions(body: dict) -> list:
-    """Direction list: explicit `rose_directions` (string or list) wins over
-    the uniform `rose_sectors` split."""
-    raw = body.get("rose_directions")
+def _parse_custom_rose_directions(raw) -> list:
+    """Parse custom directions while preserving the user's written order."""
     dirs: list = []
+    seen = set()
     if raw:
         parts = raw.replace(";", ",").split(",") if isinstance(raw, str) else list(raw)
         for p in parts:
             try:
-                dirs.append(round(float(p) % 360.0, 1))
+                direction = round(float(p) % 360.0, 1)
             except (TypeError, ValueError):
                 continue
-        dirs = sorted(set(dirs))
-    if not dirs:
-        n_sectors = max(2, min(36, int(body.get("rose_sectors") or 8)))
-        dirs = [round(i * 360.0 / n_sectors, 1) for i in range(n_sectors)]
+            if direction not in seen:
+                dirs.append(direction)
+                seen.add(direction)
     return dirs
 
 
+def _parse_rose_directions(body: dict) -> list:
+    """Custom directions win; otherwise split uniformly from Step 1 wind."""
+    max_sectors = max(2, _env_nonnegative_int("PINN_WEBAPP_MAX_ROSE_SECTORS", 16))
+    custom = _parse_custom_rose_directions(body.get("rose_directions"))
+    if custom:
+        if len(custom) > max_sectors:
+            raise ValueError(f"wind roses are limited to {max_sectors} directions")
+        return custom
+    n_sectors = max(2, min(max_sectors, int(body.get("rose_sectors") or 8)))
+    reference = float(body.get("wind_from", 0.0)) % 360.0
+    return [
+        round((reference + i * 360.0 / n_sectors) % 360.0, 1)
+        for i in range(n_sectors)
+    ]
+
+
+def _normalise_yaw(yaw_deg: float) -> float:
+    """Canonical signed yaw, preserving physical orientation modulo 360."""
+    return (float(yaw_deg) + 180.0) % 360.0 - 180.0
+
+
+def _rose_sector_body(
+    body: dict,
+    *,
+    sector_name: str,
+    sector_wind_from: float,
+    geometry_reference_wind_from: float,
+) -> dict:
+    """Build one rose request while keeping structures fixed geographically.
+
+    DEM preparation rotates the terrain into a wind-aligned local frame. A
+    yaw entered in the UI is expressed in that local frame, so reusing it for
+    another inflow would rotate the physical structure with the wind. Adding
+    `(sector - reference)` to every local yaw exactly cancels that frame
+    rotation. Structure/grid centres are already CRS coordinates and therefore
+    need no compensation.
+    """
+    sec_body = copy.deepcopy(body)
+    sec_body["domain_name"] = sector_name
+    sec_body["wind_from"] = float(sector_wind_from)
+    sec_body.pop("rose_sectors", None)
+    sec_body.pop("rose_directions", None)
+    sec_body["uncertainty"] = False
+
+    yaw_delta = float(sector_wind_from) - float(geometry_reference_wind_from)
+    for structure in sec_body.get("structures") or []:
+        structure["yaw"] = _normalise_yaw(float(structure.get("yaw", 0.0)) + yaw_delta)
+    grid = sec_body.get("grid")
+    if isinstance(grid, dict):
+        grid["grid_yaw"] = _normalise_yaw(float(grid.get("grid_yaw", 0.0)) + yaw_delta)
+        grid["struct_yaw"] = _normalise_yaw(float(grid.get("struct_yaw", 0.0)) + yaw_delta)
+    return sec_body
+
+
 def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> dict:
-    """Multi-direction sweep: one full prediction per sector, rose + worst-sector
-    artifacts kept. Each sector reuses the already-downloaded DEM of the base
-    domain (copied under the sector's name, removed afterwards)."""
+    """Multi-direction sweep with a fixed geographic structure layout.
+
+    Each sector reuses the already-downloaded DEM of the base domain (copied
+    under the sector's name, removed afterwards), while full result artifacts
+    are retained for every direction.
+    """
     t0 = time.time()
 
     def _p(msg: str) -> None:
@@ -1566,13 +1808,19 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
             progress(msg)
 
     name = _safe_name(body.get("domain_name"))
+    custom_dirs = _parse_custom_rose_directions(body.get("rose_directions"))
     dirs = _parse_rose_directions(body)
     n_dirs = len(dirs)
     model_id = str(body.get("model") or "").strip() or None
     base_dem = ROOT / "dem" / name
+    geometry_reference_dir = float(body.get("wind_from", dirs[0])) % 360.0
+    governing_rule = (
+        "Custom directions: the first valid direction is user-selected as governing."
+        if custom_dirs else
+        "Evenly spaced sectors start at the Step 1 direction; the direction with the highest near-ground wind speed is governing."
+    )
 
     records: list = []
-    worst: Optional[dict] = None
     for i, d in enumerate(dirs):
         sector_name = f"{name}_r{int(round(d)) % 360:03d}"
         _p(f"direction {d:.0f}° ({i + 1}/{n_dirs})…")
@@ -1580,10 +1828,12 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
         try:
             if base_dem.exists() and not sector_dem.exists():
                 shutil.copytree(base_dem, sector_dem)
-            sec_body = dict(body, domain_name=sector_name, wind_from=d)
-            sec_body.pop("rose_sectors", None)
-            sec_body.pop("rose_directions", None)
-            sec_body["uncertainty"] = False
+            sec_body = _rose_sector_body(
+                body,
+                sector_name=sector_name,
+                sector_wind_from=d,
+                geometry_reference_wind_from=geometry_reference_dir,
+            )
             out = _run_predict(sec_body, progress=lambda m, _d=d, _i=i: _p(f"direction {_d:.0f}° ({_i + 1}/{n_dirs}): {m}"))
 
             g = (out.get("stats") or {}).get("global") or {}
@@ -1613,8 +1863,6 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
             # Full artifacts (plots, PDF, 3D inputs, exports) are kept for
             # EVERY direction so per-direction reports and 3D views work.
             # Disk: ~50-100 MB per direction under predict_web/results/.
-            if worst is None or _sector_score(rec) > _sector_score(worst):
-                worst = rec
         finally:
             # Remove the sector's workspace + DEM copy regardless of outcome.
             try:
@@ -1622,8 +1870,9 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
             except Exception:
                 pass
 
-    if not records or worst is None:
+    if not records:
         raise RuntimeError("wind rose produced no sectors")
+    worst = _select_governing_sector(records, custom_directions=bool(custom_dirs))
 
     out_dir = RESULTS_DIR / name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1638,6 +1887,8 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
         "sectors": records,
         "worst_domain": worst["domain"],
         "worst_dir_deg": worst["dir_deg"],
+        "geometry_reference_dir_deg": geometry_reference_dir,
+        "governing_rule": governing_rule,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     with (out_dir / "rose_summary.json").open("w", encoding="utf-8") as f:
@@ -1699,6 +1950,8 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
         "sectors": records,
         "worst_domain": worst["domain"],
         "worst_dir_deg": worst["dir_deg"],
+        "geometry_reference_dir_deg": geometry_reference_dir,
+        "governing_rule": governing_rule,
         "n_structures": int(worst.get("n_structures") or 0),
         "rose_png_base64": _b64.b64encode(rose_png).decode("ascii"),
         "plots": plots_payload,
@@ -1707,10 +1960,10 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
     }
 
 
-def _rose_3d_wrapper_html(name: str, *, structure: bool) -> str:
-    """3D viewer wrapper for a wind-rose run: a direction selector swaps an
-    iframe between the per-direction 3D views, each generated lazily on first
-    selection by the normal /view_3d[_structure] endpoints."""
+def _rose_direction_wrapper_html(
+    name: str, *, endpoint: str, heading: str, detail: str
+) -> str:
+    """Direction selector shared by wind-rose map and 3D result pages."""
     p = RESULTS_DIR / name / "rose_summary.json"
     if not p.exists():
         raise FileNotFoundError(f"No rose summary for '{name}'")
@@ -1718,31 +1971,58 @@ def _rose_3d_wrapper_html(name: str, *, structure: bool) -> str:
     secs = summary.get("sectors") or []
     if not secs:
         raise FileNotFoundError(f"rose summary for '{name}' has no directions")
-    endpoint = "/view_3d_structure" if structure else "/view_3d"
     worst_dom = summary.get("worst_domain")
     opts = []
     for r in secs:
         gov = " — governing" if r.get("domain") == worst_dom else ""
         opts.append(
-            f'<option value="{quote(str(r.get("domain", "")))}">'
+            f'<option value="{_html.escape(str(r.get("domain", "")), quote=True)}">'
             f'{float(r.get("dir_deg", 0)):.0f}°{gov}</option>'
         )
     first = quote(str(secs[0]["domain"]))
-    kind = "structure view" if structure else "view"
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>3D {kind} — {_html.escape(name)} (wind rose)</title>"
+        f"<title>{_html.escape(heading)} — {_html.escape(name)} (wind rose)</title>"
         "<style>body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;}"
         "#bar{padding:8px 14px;background:#0d47a1;color:#fff;display:flex;gap:10px;align-items:center;}"
         "select{padding:5px;border-radius:5px;border:none;font-size:14px;}"
-        "iframe{border:none;width:100%;height:calc(100vh - 46px);}</style></head><body>"
-        f"<div id='bar'><b>3D {kind} — {_html.escape(name)}</b>"
+        "#viewer{position:relative;height:calc(100vh - 46px);}"
+        "#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;"
+        "background:#fff;color:#555;font-size:14px;z-index:2;}"
+        "iframe{border:none;width:100%;height:100%;}</style></head><body>"
+        f"<div id='bar'><b>{_html.escape(heading)} — {_html.escape(name)}</b>"
         "<label for='dirSel'>Wind direction:</label>"
-        f"<select id='dirSel' onchange=\"document.getElementById('v').src='{endpoint}?domain='+this.value;\">"
+        "<select id='dirSel' onchange='loadDirection(this.value)'>"
         + "".join(opts) +
-        "</select><span style='font-size:12px;opacity:0.85;'>each direction renders on first selection (a few seconds)</span></div>"
-        f"<iframe id='v' src='{endpoint}?domain={first}'></iframe>"
+        f"</select><span style='font-size:12px;opacity:0.85;'>{_html.escape(detail)}</span></div>"
+        "<div id='viewer'><div id='loading'>Loading selected direction…</div>"
+        f"<iframe id='v' src='{endpoint}?domain={first}' "
+        "onload=\"document.getElementById('loading').style.display='none'\"></iframe></div>"
+        "<script>function loadDirection(domain){var l=document.getElementById('loading');"
+        "l.style.display='flex';document.getElementById('v').src='"
+        + endpoint
+        + "?domain='+encodeURIComponent(domain);}</script>"
         "</body></html>"
+    )
+
+
+def _rose_3d_wrapper_html(name: str, *, structure: bool) -> str:
+    endpoint = "/view_3d_structure" if structure else "/view_3d"
+    heading = "3D structure view" if structure else "3D view"
+    return _rose_direction_wrapper_html(
+        name,
+        endpoint=endpoint,
+        heading=heading,
+        detail="Each direction renders on first selection.",
+    )
+
+
+def _rose_map_wrapper_html(name: str) -> str:
+    return _rose_direction_wrapper_html(
+        name,
+        endpoint="/map",
+        heading="Interactive map",
+        detail="Select a wind direction to compare wind, pressure and terrain.",
     )
 
 
@@ -1999,11 +2279,20 @@ def _zip_plots(domain_name: str) -> bytes:
 # HTTP handler
 # ---------------------------------------------------------------------------
 class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "pinnfluid"
+    sys_version = ""
     dem_root = str(ROOT / "dem")
     page_html: str = ""
 
     def log_message(self, fmt, *args):
         pass
+
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "same-origin")
+        super().end_headers()
 
     def _json(self, payload: dict, *, status: int = 200) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -2013,9 +2302,123 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_json_body(self) -> Optional[dict]:
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._json({
+                "success": False,
+                "error": "chunked request bodies are not supported",
+            }, status=400)
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.close_connection = True
+            self._json({"success": False, "error": "Content-Length is required"}, status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            self._json({"success": False, "error": "invalid Content-Length"}, status=400)
+            return None
+        if length < 0:
+            self._json({"success": False, "error": "invalid Content-Length"}, status=400)
+            return None
+        max_bytes = _env_mebibytes("PINN_WEBAPP_MAX_REQUEST_MB", 32)
+        if length > max_bytes:
+            self.close_connection = True
+            self._json({
+                "success": False,
+                "error": f"request body exceeds the {max_bytes // (1024 * 1024)} MiB limit",
+            }, status=413)
+            return None
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._json({"success": False, "error": "incomplete request body"}, status=400)
+            return None
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._json({"success": False, "error": "request body must be valid JSON"}, status=400)
+            return None
+        if not isinstance(payload, dict):
+            self._json({"success": False, "error": "request JSON must be an object"}, status=400)
+            return None
+        return payload
+
+    def _admit_preparation(self) -> bool:
+        ok, message, retry_after = _prep_admit()
+        if ok:
+            return True
+        self._json({
+            "success": False,
+            "error": message,
+            "retry_after": retry_after,
+        }, status=429)
+        return False
+
+    def _send_path(
+        self,
+        path: Path,
+        *,
+        content_type: str,
+        content_disposition: Optional[str] = None,
+        allow_gzip: bool = True,
+    ) -> None:
+        """Stream a file with HTTP chunking, optionally gzip-compressed.
+
+        Plotly 3D pages can exceed Cloud Run's 32 MiB limit for buffered
+        HTTP/1 responses. Chunking marks the response as streamed; gzip keeps
+        transfer and browser parsing costs reasonable without changing the
+        cached HTML artifact.
+        """
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        use_gzip = allow_gzip and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        if content_disposition:
+            self.send_header("Content-Disposition", content_disposition)
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        compressor = (
+            zlib.compressobj(level=5, wbits=16 + zlib.MAX_WBITS)
+            if use_gzip else None
+        )
+
+        def _chunk(data: bytes) -> None:
+            if not data:
+                return
+            self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+            self.wfile.write(data)
+            self.wfile.write(b"\r\n")
+
+        try:
+            with path.open("rb") as src:
+                while True:
+                    raw = src.read(1024 * 1024)
+                    if not raw:
+                        break
+                    _chunk(compressor.compress(raw) if compressor else raw)
+            if compressor:
+                _chunk(compressor.flush())
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def do_GET(self):
         path = urlparse(self.path).path
-        if path == "/healthz":
+        # Cloud Run reserves /healthz at its frontend, so /status is the
+        # externally reachable diagnostic endpoint. Keep the old path for
+        # local compatibility.
+        if path in ("/status", "/healthz"):
             self._json({
                 "status": "ok",
                 "models": [m["id"] for m in list_models()],
@@ -2058,16 +2461,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._json(job)
             return
-        if path in ("/view_3d_rose", "/view_3d_structure_rose"):
+        if path in ("/map_rose", "/view_3d_rose", "/view_3d_structure_rose"):
             qs = parse_qs(urlparse(self.path).query)
             domain = unquote(qs.get("domain", [""])[0]).strip()
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
                 domain = _safe_name(domain)
-                data = _rose_3d_wrapper_html(
-                    domain, structure=path.endswith("structure_rose")
-                ).encode("utf-8")
+                if path == "/map_rose":
+                    html = _rose_map_wrapper_html(domain)
+                else:
+                    html = _rose_3d_wrapper_html(
+                        domain, structure=path.endswith("structure_rose")
+                    )
+                data = html.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -2076,7 +2483,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as ex:
                 self._json({"success": False, "error": str(ex)}, status=404)
             return
-        if path == "/runs":
+        if path == "/runs" and _env_flag("PINN_WEBAPP_ENABLE_RUN_INDEX", False):
             try:
                 data = _runs_index_html().encode("utf-8")
                 self.send_response(200)
@@ -2175,12 +2582,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not domain:
                     raise ValueError("missing ?domain=")
                 domain = _safe_name(domain)
-                data = _ensure_map_html(domain).read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                self._send_path(
+                    _ensure_map_html(domain),
+                    content_type="text/html; charset=utf-8",
+                )
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -2193,17 +2598,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("missing ?domain=")
                 domain = _safe_name(domain)
                 html_path = _ensure_3d_html(domain)
-                data = html_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                if path == "/download_3d":
-                    self.send_header(
-                        "Content-Disposition",
-                        f'attachment; filename="{domain}_view_3d.html"',
-                    )
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                disposition = (
+                    f'attachment; filename="{domain}_view_3d.html"'
+                    if path == "/download_3d" else None
+                )
+                self._send_path(
+                    html_path,
+                    content_type="text/html; charset=utf-8",
+                    content_disposition=disposition,
+                    allow_gzip=path != "/download_3d",
+                )
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -2229,18 +2633,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if roi_label is not None and roi_label not in labels:
                     raise ValueError(f"unknown roi '{roi_label}' for domain '{domain}'")
                 html_path = _ensure_structure_3d_html(domain, roi_label=roi_label)
-                data = html_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                disposition = None
                 if path == "/download_3d_structure":
                     fn_suffix = f"_{roi_label}" if roi_label else ""
-                    self.send_header(
-                        "Content-Disposition",
-                        f'attachment; filename="{domain}_view_3d_structure{fn_suffix}.html"',
+                    disposition = (
+                        f'attachment; filename="{domain}_view_3d_structure{fn_suffix}.html"'
                     )
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                self._send_path(
+                    html_path,
+                    content_type="text/html; charset=utf-8",
+                    content_disposition=disposition,
+                    allow_gzip=path != "/download_3d_structure",
+                )
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -2248,15 +2652,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length)) if length else {}
+        body = self._read_json_body()
+        if body is None:
+            return
 
         if self.path == "/download_dem":
+            admitted = False
             try:
-                west, south = body["west"], body["south"]
-                east, north = body["east"], body["north"]
+                west, south, east, north = _validate_dem_bounds(body)
                 name = _safe_name(body.get("domain_name", "unnamed"))
                 res = body.get("resolution", "2")
+                if str(res) != "2":
+                    raise ValueError("only the 2 m public DEM resolution is supported")
+                if not self._admit_preparation():
+                    return
+                admitted = True
                 output_dir = os.path.join(self.dem_root, name)
 
                 print(f"\n[DEM] {name}: W={west:.5f} S={south:.5f} E={east:.5f} N={north:.5f}", flush=True)
@@ -2282,19 +2692,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"[ERROR] {e}", flush=True)
                 traceback.print_exc()
-                self._json({"success": False, "error": str(e)})
+                self._json({"success": False, "error": str(e)}, status=400)
+            finally:
+                if admitted:
+                    _prep_release()
             return
 
         if self.path == "/upload_dem":
+            admitted = False
             try:
-                import base64
                 name = _safe_name(body.get("domain_name", ""))
                 data_b64 = body.get("data_base64") or ""
                 if not data_b64:
                     raise ValueError("missing data_base64 (base64-encoded GeoTIFF)")
-                dem_bytes = base64.b64decode(data_b64)
+                max_upload = _env_mebibytes("PINN_WEBAPP_MAX_UPLOAD_MB", 20)
+                estimated_size = (len(data_b64) * 3) // 4
+                if estimated_size > max_upload + 3:
+                    raise ValueError(
+                        f"uploaded DEM exceeds the {max_upload // (1024 * 1024)} MiB limit"
+                    )
+                try:
+                    dem_bytes = _b64.b64decode(data_b64, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError("data_base64 is not valid base64") from exc
                 if len(dem_bytes) < 1000:
                     raise ValueError("uploaded file is too small to be a valid DEM")
+                if len(dem_bytes) > max_upload:
+                    raise ValueError(
+                        f"uploaded DEM exceeds the {max_upload // (1024 * 1024)} MiB limit"
+                    )
+                if not self._admit_preparation():
+                    return
+                admitted = True
                 # Wipe any prior dem/<name>/ so a stale Swiss DEM doesn't shadow.
                 try:
                     cleanup_case(name)
@@ -2312,12 +2741,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 traceback.print_exc()
-                self._json({"success": False, "error": str(e)})
+                self._json({"success": False, "error": str(e)}, status=400)
+            finally:
+                if admitted:
+                    _prep_release()
             return
 
         if self.path == "/build_inputs":
             name = str(body.get("domain_name", "")).strip()
+            admitted = False
             try:
+                _safe_name(name)
+                _validate_compute_request(body)
+                if not self._admit_preparation():
+                    return
+                admitted = True
                 self._json(_run_build_inputs(body))
             except Exception as e:
                 traceback.print_exc()
@@ -2326,13 +2764,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     # full terrain re-download.
                     try: cleanup_case(name, keep_dem=True)
                     except Exception: pass
-                self._json({"success": False, "error": f"{type(e).__name__}: {e}"})
+                self._json({
+                    "success": False,
+                    "error": f"{type(e).__name__}: {e}",
+                }, status=400)
+            finally:
+                if admitted:
+                    _prep_release()
             return
 
         if self.path in ("/predict", "/predict_rose"):
             is_rose = self.path == "/predict_rose"
             try:
                 name = _safe_name(body.get("domain_name"))
+                _validate_compute_request(body)
+                if is_rose:
+                    _parse_rose_directions(body)
             except ValueError as e:
                 self._json({"success": False, "error": str(e)}, status=400)
                 return

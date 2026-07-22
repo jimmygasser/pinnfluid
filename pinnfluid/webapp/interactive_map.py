@@ -93,6 +93,12 @@ def _box_path(x0, y0, x1, y1, angle, cx, cy) -> str:
     return "M " + " L ".join(f"{px:.2f},{py:.2f}" for px, py in pts) + " Z"
 
 
+def _footprint_path(points, angle, cx, cy) -> str:
+    """SVG path for an oriented structure footprint in the north-up frame."""
+    pts = [_rotpt(float(p[0]), float(p[1]), angle, cx, cy) for p in points]
+    return "M " + " L ".join(f"{px:.2f},{py:.2f}" for px, py in pts) + " Z"
+
+
 def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
                    pred_flow: "np.ndarray | None" = None) -> Path:
     out_path = Path(out_path)
@@ -217,10 +223,15 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
     shapes = []
     for sb in gctx["boxes"]:
         try:
+            footprint = sb.get("footprint_xy")
+            if isinstance(footprint, (list, tuple)) and len(footprint) >= 3:
+                path = _footprint_path(footprint, angle, cx, cy)
+            else:
+                path = _box_path(float(sb["min"][0]), float(sb["min"][1]),
+                                 float(sb["max"][0]), float(sb["max"][1]),
+                                 angle, cx, cy)
             shapes.append(dict(type="path",
-                               path=_box_path(float(sb["min"][0]), float(sb["min"][1]),
-                                              float(sb["max"][0]), float(sb["max"][1]),
-                                              angle, cx, cy),
+                               path=path,
                                line=dict(color="white", width=1.3),
                                fillcolor="rgba(20,20,20,0.12)", layer="above"))
         except (KeyError, IndexError, TypeError, ValueError):

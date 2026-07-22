@@ -70,12 +70,6 @@ mirrored copies of the 256 training cases. The mirrored split therefore has
 
 ## Where to get it
 
-As of now, the dataset is not published. As soon as it will be published 
-on a repository, the information where to get it will be actualised.
-
-## Programmatic access (future)
-
-The plan is to keep it on the archive and pull
-cases on demand through an API (the same pattern already used for experiment
-tracking). `config.py` centralises the data root, so switching from a local
-folder to a remote/cached fetch is a localised change.
+The CFD training dataset is not currently distributed publicly. The pretrained
+checkpoints and prediction app can be used without it. Access and archival
+information will be added here if the dataset is released.

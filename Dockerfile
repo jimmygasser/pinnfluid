@@ -14,6 +14,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PINN_WEBAPP_RESULTS_DIR=/tmp/pinnfluid-results \
     PINN_WEBAPP_MAX_RUNS=5 \
     PINN_WEBAPP_MAX_GB=1 \
+    PINN_WEBAPP_MAX_ACTIVE_JOBS=1 \
+    PINN_WEBAPP_RATE_LIMIT_JOBS=4 \
+    PINN_WEBAPP_RATE_LIMIT_PREP=12 \
+    PINN_WEBAPP_RATE_LIMIT_WINDOW=3600 \
+    PINN_WEBAPP_MAX_ROSE_SECTORS=8 \
+    PINN_WEBAPP_MAX_REQUEST_MB=32 \
+    PINN_WEBAPP_MAX_UPLOAD_MB=20 \
+    PINN_WEBAPP_MAX_DOMAIN_M=3000 \
+    PINN_WEBAPP_MAX_SINGLE_STRUCTURES=10 \
+    PINN_WEBAPP_ENABLE_RUN_INDEX=0 \
     PORT=8080
 
 RUN apt-get update \
@@ -57,6 +67,6 @@ USER pinnfluid
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8080') + '/healthz', timeout=3)" || exit 1
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8080') + '/status', timeout=3)" || exit 1
 
 CMD ["python", "-u", "pinnfluid/webapp/app.py", "--no-browser"]

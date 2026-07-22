@@ -1,9 +1,9 @@
 # webapp — interactive wind-field prediction app (BETA)
 
 > **Beta / test phase.** This app is a research demo, not a validated
-> engineering tool. Its loads, pressures and snow indicators are pre-design
-> screening estimates, not code-verified design values. Do not use it as the
-> sole basis for any real design decision.
+> engineering tool. Its experimental loads, pressures and snow indicators are
+> pre-design screening estimates, not code-verified design values. Do not use
+> it as the sole basis for any real design decision.
 
 A local web app around the pinnfluid surrogate: pick a Swiss location (or
 import a DEM), place structures, predict the 3D wind and pressure field in
@@ -46,14 +46,15 @@ are missing are hidden automatically. See `checkpoints/README.md`.
 - **Wind rose** — one full prediction per direction (4/8/12/16 sectors or a
   custom list), a binned-colour rose, per-direction loads, a combined
   multi-direction PDF, and 3D viewers with a direction selector.
-- **Loads** — per-structure forces by surface-pressure integration over the STL
-  mesh (with overturning moment and projected frontal area); ISA air density at
-  the site elevation. Pre-design estimates only.
+- **Experimental loads** — per-structure, pressure-only force estimates from
+  integration over the STL mesh (with overturning moment and projected frontal
+  area); ISA air density at the site elevation. Components in the horizontal
+  plane use the current wind-aligned frame. These are screening values, not
+  validated design loads.
 - **Uncertainty map** — optional second run with the other model family
   (hybrid vs U-Net); |ΔU| disagreement maps and stats.
 - **Snow drift indicator** — heuristic near-surface wind-speed thresholding
   (deposition / neutral / erosion). A screening layer, not a transport model.
-- **Past runs** — `/runs` lists saved results with PDF / 3D / export links.
 
 ## Configuration
 
@@ -66,9 +67,16 @@ Environment variables (all optional):
 | `PINN_WEBAPP_MAX_GB`    | 15      | keep saved runs under this size budget in GB (0 disables)     |
 | `PINN_WEBAPP_MAX_ACTIVE_JOBS` | 0 | reject jobs once this many are queued/running (0 disables)    |
 | `PINN_WEBAPP_RATE_LIMIT_JOBS` | 0 | process-wide job submissions per window (0 disables)          |
+| `PINN_WEBAPP_RATE_LIMIT_PREP` | 0 | terrain downloads/uploads/builds per window (0 disables)      |
 | `PINN_WEBAPP_RATE_LIMIT_WINDOW` | 3600 | submission-limit window in seconds                       |
+| `PINN_WEBAPP_MAX_ROSE_SECTORS` | 16 | maximum directions in one wind-rose job                    |
+| `PINN_WEBAPP_MAX_REQUEST_MB` | 32 | maximum JSON request body                                   |
+| `PINN_WEBAPP_MAX_UPLOAD_MB` | 20 | maximum decoded custom GeoTIFF                              |
+| `PINN_WEBAPP_MAX_DOMAIN_M` | 3000 | maximum terrain width and height                            |
+| `PINN_WEBAPP_MAX_SINGLE_STRUCTURES` | 10 | maximum individually placed structures                 |
+| `PINN_WEBAPP_ENABLE_RUN_INDEX` | 0 | expose the shared `/runs` index when set to 1              |
 | `PINN_DEVICE`           | auto    | force `cpu` or `cuda`                                         |
-| `PINN_WEBAPP_GITHUB_URL`| (placeholder) | the "About / GitHub" link in the app header            |
+| `PINN_WEBAPP_GITHUB_URL`| project repository | the "About / GitHub" link in the app header      |
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
 | `PORT`                  | 8779    | listen port (Cloud Run / Docker set this automatically)       |
 | `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container     |
@@ -93,9 +101,11 @@ strict CSP.
 ## Security / deployment status
 
 Bound to `127.0.0.1` by default and **no authentication**. Domain names are
-sanitised against path traversal and HTML endpoints escape user input. The
-optional process-wide job limit prevents an unbounded prediction queue, but
-there is no CSRF protection and it is not DDoS-grade rate limiting. Follow
+sanitised against path traversal, HTML endpoints escape user input, request and
+DEM sizes are bounded, and terrain/prediction operations have optional
+process-wide admission limits. The shared past-run index is disabled by
+default; result URLs remain unlisted rather than access-controlled. There is no
+CSRF protection and the in-process limits are not DDoS-grade. Follow
 `DEPLOY.md` before exposing the app publicly; use authentication or Cloud Armor
 if stronger per-user enforcement becomes necessary.
 Checkpoints are loaded with `torch.load(weights_only=False)` — only load

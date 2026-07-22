@@ -254,8 +254,8 @@ def _surface_integrated_forces(
     centre. Faces whose probes land in solid/NaN cells are skipped and reported
     via `area_coverage`. Far more faithful than the AABB-halo estimate (tilted
     panels, real frontal area, suction sides), but still based on the predicted
-    pressure field at 0.5 m resolution — treat as pre-design loads, not
-    code-verified design values. Shear stress is not included.
+    pressure field at 0.5 m resolution. These are experimental pre-design
+    estimates, not code-verified design values. Shear stress is not included.
     """
     from units import RHO_AIR  # type: ignore  noqa: E402
     try:
@@ -718,11 +718,11 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
                     return f"{float(v):+{w}.{prec}f}"
                 out.append("")
                 method = (forces[0].get('method') or 'aabb_halo')
-                out.append("    Estimated wind loads"
+                out.append("    Experimental wind-load estimates"
                            + ("  [surface pressure integration over STL mesh]"
                               if method == 'surface_integration' else
                               "  [first-order AABB face estimate]"))
-                out.append(f"      {'#':>3s} {'Fx [N]':>10s} {'Fy [N]':>10s} {'Fz [N]':>10s} {'|Fdrag| [N]':>12s} {'M_ovt [Nm]':>11s} {'Cd':>7s}")
+                out.append(f"      {'#':>3s} {'Fx loc [N]':>10s} {'Fy loc [N]':>10s} {'Fz [N]':>10s} {'|Fdrag| [N]':>12s} {'M_ovt [Nm]':>11s} {'Cd':>7s}")
                 for i, f in enumerate(forces):
                     fx, fy, fz = (f.get('F_N') or [None] * 3)
                     fd = f.get('F_drag_N')
@@ -742,7 +742,8 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
                         out.append(f"      Surface coverage of pressure samples: {100.0 * min(cov):.0f}-{100.0 * max(cov):.0f}% of mesh area.")
                 else:
                     out.append("      Forces from AABB face-mean pressures (fallback path).")
-                out.append("      Cd = F_drag / (0.5*rho*Uref^2*A_frontal). Pre-design estimate, not a code-verified design load.")
+                out.append("      Fx/Fy are wind-aligned local components for this inflow direction.")
+                out.append("      Cd = F_drag / (0.5*rho*Uref^2*A_frontal). Experimental pressure-only screening estimate, not a validated design load.")
                 out.append(
                     f"      Forces use rho = {air.get('rho_kg_m3', 1.225):.3f} kg/m3 "
                     f"(ISA at site elevation {air.get('site_elevation_m_asl', 0):.0f} m a.s.l.)."

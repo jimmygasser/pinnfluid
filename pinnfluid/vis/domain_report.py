@@ -511,38 +511,52 @@ def _overlay_structure_boxes(
             xmax, ymax = float(sb["max"][0]), float(sb["max"][1])
         except Exception:
             continue
+        footprint = sb.get("footprint_xy")
+        footprint_xy = None
+        if isinstance(footprint, (list, tuple)) and len(footprint) >= 3:
+            try:
+                footprint_xy = [
+                    (float(point[0]), float(point[1])) for point in footprint
+                ]
+            except (TypeError, ValueError, IndexError):
+                footprint_xy = None
         if fill_alpha > 0.0:
-            fill_rect = patches.Rectangle(
-                (xmin, ymin),
-                xmax - xmin,
-                ymax - ymin,
-                fill=True,
-                facecolor=facecolor,
-                edgecolor="none",
-                alpha=float(fill_alpha),
-                zorder=4,
-                transform=trans,
+            if footprint_xy is not None:
+                fill_shape = patches.Polygon(
+                    footprint_xy, closed=True, fill=True,
+                    facecolor=facecolor, edgecolor="none",
+                    alpha=float(fill_alpha), zorder=4, transform=trans,
+                )
+            else:
+                fill_shape = patches.Rectangle(
+                    (xmin, ymin), xmax - xmin, ymax - ymin, fill=True,
+                    facecolor=facecolor, edgecolor="none",
+                    alpha=float(fill_alpha), zorder=4, transform=trans,
+                )
+            ax.add_patch(fill_shape)
+        if footprint_xy is not None:
+            outline = patches.Polygon(
+                footprint_xy, closed=True, fill=False, edgecolor=edgecolor,
+                linestyle=linestyle, linewidth=linewidth, alpha=alpha,
+                zorder=5, transform=trans,
             )
-            ax.add_patch(fill_rect)
-        rect = patches.Rectangle(
-            (xmin, ymin),
-            xmax - xmin,
-            ymax - ymin,
-            fill=False,
-            edgecolor=edgecolor,
-            linestyle=linestyle,
-            linewidth=linewidth,
-            alpha=alpha,
-            zorder=5,
-            transform=trans,
-        )
-        ax.add_patch(rect)
+        else:
+            outline = patches.Rectangle(
+                (xmin, ymin), xmax - xmin, ymax - ymin, fill=False,
+                edgecolor=edgecolor, linestyle=linestyle,
+                linewidth=linewidth, alpha=alpha, zorder=5, transform=trans,
+            )
+        ax.add_patch(outline)
         if number_labels:
             # Centre the structure number inside its box. A thin stroke keeps
             # the small digits legible over any background colour without a
             # filled badge that could spill onto neighbouring structures.
-            cx = 0.5 * (xmin + xmax)
-            cy = 0.5 * (ymin + ymax)
+            if footprint_xy is not None:
+                cx = sum(point[0] for point in footprint_xy) / len(footprint_xy)
+                cy = sum(point[1] for point in footprint_xy) / len(footprint_xy)
+            else:
+                cx = 0.5 * (xmin + xmax)
+                cy = 0.5 * (ymin + ymax)
             txt = ax.text(
                 cx,
                 cy,

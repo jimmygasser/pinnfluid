@@ -64,6 +64,7 @@ requirements.txt
 LICENSE
 CITATION.cff
 DATA.md                    where the CFD + STL datasets live and how to place them
+tests/                     release and web-app regression tests
 ```
 
 Modules are imported flat (e.g. `from models import create_model`), so run
@@ -78,6 +79,14 @@ pip install -r requirements.txt
 
 A CPU-only PyTorch build runs the hybrid model comfortably. The 3D U-Net is
 much faster on a GPU.
+
+## Tests
+
+Run the release regression suite from the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Run the prediction app (BETA)
 
@@ -96,8 +105,9 @@ feature list and the important security/deployment caveats.
 
 ## Reproducing the two final models
 
-The datasets are hosted separately (see [`DATA.md`](DATA.md)). Once the CFD
-data is placed under `data/cfd/`, create the mirrored training root:
+The training dataset is not currently distributed publicly (see
+[`DATA.md`](DATA.md)). Once the CFD data is available under `data/cfd/`, create
+the mirrored training root:
 
 ```bash
 python pinnfluid/input_prep/make_y_mirror_cfd.py \
@@ -126,12 +136,10 @@ inference rebuilds the network without needing the YAML.
 
 ## License
 
-Released under the MIT License (see [`LICENSE`](LICENSE)). Confirm the choice
-of license with your PhD supervisor and the EPFL Technology Transfer Office
-before the public release, and check the licenses of the swisstopo DEM tiles
-and any bundled STL geometry.
+Released under the MIT License (see [`LICENSE`](LICENSE)). External terrain
+data and third-party geometry remain subject to their respective licences.
 
 ## Citation
 
-If you use this code or the models, please cite the accompanying paper (see
-[`CITATION.cff`](CITATION.cff)).
+If you use this code or the models, cite the software using
+[`CITATION.cff`](CITATION.cff). A paper citation will be added after publication.

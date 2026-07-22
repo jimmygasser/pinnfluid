@@ -873,7 +873,8 @@ function addGridAtLatLng(lat, lng) {
   // Grid yaw
   var gridYawDeg = parseFloat(document.getElementById('gridYaw').value) || 0;
   // Wind direction determines the grid's +x (rows along wind)
-  var windFrom = parseFloat(document.getElementById('windFrom').value) || 270;
+  var windFrom = parseFloat(document.getElementById('windFrom').value);
+  if (!Number.isFinite(windFrom)) windFrom = 270;
   var windTo = (windFrom + 180) % 360;
   var xAxisRad = (90 - windTo) * Math.PI / 180;
   var totalRad = xAxisRad + gridYawDeg * Math.PI / 180;
@@ -897,6 +898,21 @@ function addGridAtLatLng(lat, lng) {
   setStatus('Grid placed: ' + rows + 'x' + cols + ' at (' + lat.toFixed(5) + ', ' + lng.toFixed(5) + ')', 'ok');
   return true;
 }
+
+// Keep the footprint preview synchronized with every control that changes its
+// size or orientation. Previously it was only redrawn when the centre was
+// placed, so changing wind direction or grid yaw left a stale rectangle.
+function refreshGridPreview() {
+  if (!gridCenter || !document.getElementById('enableGrid').checked) return;
+  addGridAtLatLng(gridCenter.lat, gridCenter.lng);
+}
+['gridRows', 'gridCols', 'gridSpacingX', 'gridSpacingY', 'gridYaw', 'windFrom']
+  .forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', refreshGridPreview);
+    el.addEventListener('change', refreshGridPreview);
+  });
 
 function addGridManual() {
   var e = parseFloat(document.getElementById('gridE').value);
@@ -1019,9 +1035,9 @@ function uploadCustomDEM() {
     setStatus('Choose a GeoTIFF file first','err'); return;
   }
   var file = fileInput.files[0];
-  var maxBytes = 80 * 1024 * 1024;  // 80 MB — way more than 3km×3km @ 2m/float32 ≈ 9 MB
+  var maxBytes = 20 * 1024 * 1024;
   if (file.size > maxBytes) {
-    setStatus('File too large ('+(file.size/1e6).toFixed(1)+' MB > 80 MB)','err'); return;
+    setStatus('File too large ('+(file.size/1e6).toFixed(1)+' MB > 20 MB)','err'); return;
   }
   setStatus('Uploading custom DEM ('+(file.size/1e6).toFixed(1)+' MB)...','busy');
   document.getElementById('btnUploadDEM').disabled = true;
@@ -1670,6 +1686,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
                 lx = s_info["placement_local"]["x"]
                 ly = s_info["placement_local"]["y"]
                 zt = s_info["z_terrain"]
+                yaw_deg = float(s_info.get("yaw_deg", 0.0))
                 # Apply z_offset from finalize (z_min shift)
                 tf_path = tri_dir / "transform.json"
                 z_off = 0.0
@@ -1678,9 +1695,47 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
                         tf_meta = json.load(f)
                     z_off = float(tf_meta.get("z_offset_applied", 0))
                 zt_local = zt + z_off
+
+                # Use the AABB measured from the actually placed/yawed mesh.
+                # Rebuilding it from the source STL's unrotated extents makes
+                # wind-rose plots falsely show structures rotating with wind.
+                placed_bounds = s_info.get("placed_bounds")
+                if (
+                    isinstance(placed_bounds, list)
+                    and len(placed_bounds) >= 2
+                    and len(placed_bounds[0]) >= 3
+                    and len(placed_bounds[1]) >= 3
+                ):
+                    xmin, ymin = float(placed_bounds[0][0]), float(placed_bounds[0][1])
+                    xmax, ymax = float(placed_bounds[1][0]), float(placed_bounds[1][1])
+                    zmin = float(placed_bounds[0][2]) + z_off
+                    zmax = float(placed_bounds[1][2]) + z_off
+                else:
+                    angle = math.radians(yaw_deg)
+                    rot_half_x = abs(half_x * math.cos(angle)) + abs(half_y * math.sin(angle))
+                    rot_half_y = abs(half_x * math.sin(angle)) + abs(half_y * math.cos(angle))
+                    xmin, xmax = lx - rot_half_x, lx + rot_half_x
+                    ymin, ymax = ly - rot_half_y, ly + rot_half_y
+                    zmin, zmax = zt_local, zt_local + struct_h
+
+                angle = math.radians(yaw_deg)
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                footprint_xy = []
+                for dx, dy in (
+                    (-half_x, -half_y),
+                    (half_x, -half_y),
+                    (half_x, half_y),
+                    (-half_x, half_y),
+                ):
+                    footprint_xy.append([
+                        lx + dx * cos_a - dy * sin_a,
+                        ly + dx * sin_a + dy * cos_a,
+                    ])
                 struct_bounds.append({
-                    "min": [lx - half_x, ly - half_y, zt_local],
-                    "max": [lx + half_x, ly + half_y, zt_local + struct_h],
+                    "min": [xmin, ymin, zmin],
+                    "max": [xmax, ymax, zmax],
+                    "footprint_xy": footprint_xy,
+                    "yaw_deg": yaw_deg,
                     "label": s_info.get("label", s_info.get("id", "")),
                 })
         elif placed_mesh is not None:

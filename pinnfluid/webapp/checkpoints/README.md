@@ -11,7 +11,7 @@ published in the model release and downloaded here.
 | `hybrid-stage1-292d.pth`    | Hybrid cascade — Stage 1    | 14 MB |
 | `hybrid-stage2-292d.pth`    | Hybrid cascade — Stage 2    | 7 MB |
 
-These are the seed-42 Iter5 checkpoints trained with y-reflection augmentation
+These are the seed-42 final checkpoints trained with y-reflection augmentation
 and turbulent-viscosity momentum residuals:
 
 - `H292_ymir_s1_phys_nut` and `H292_ymir_s2_phys_nut_on_ymir_s1`
@@ -37,5 +37,5 @@ python fetch_checkpoints.py
 Each checkpoint stores the exact training config, input/output scalers, and
 weights, so the app rebuilds the right architecture from the file alone.
 
-> TODO: publish the weights (Zenodo/EnviDat model release or a GitHub release)
-> and put the download URLs in `fetch_checkpoints.py`.
+The helper downloads the assets from the `v0.1.0-beta` GitHub release and
+verifies every SHA-256 checksum.
