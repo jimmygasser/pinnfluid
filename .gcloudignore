@@ -1,0 +1,25 @@
+.git
+.github
+.gitignore
+.dockerignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+data/
+dem/
+results/
+wandb/
+*.log
+pinnfluid/webapp/results/
+pinnfluid/webapp/workspace/
+
+# Preserve only the four published final-model weights.
+pinnfluid/webapp/checkpoints/*.pth
+pinnfluid/webapp/checkpoints/*.pt
+!pinnfluid/webapp/checkpoints/hybrid-stage1-292d.pth
+!pinnfluid/webapp/checkpoints/hybrid-stage2-292d.pth
+!pinnfluid/webapp/checkpoints/grid-unet-stage1-292d.pth
+!pinnfluid/webapp/checkpoints/grid-unet-stage2-292d.pth

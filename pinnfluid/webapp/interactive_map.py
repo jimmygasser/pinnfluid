@@ -250,7 +250,15 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
         shapes=shapes,
         xaxis=dict(title="x [m]", constrain="domain", visible=False),
         yaxis=dict(scaleanchor="x", scaleratio=1, visible=False),
-        margin=dict(l=20, r=20, t=80, b=20),
+        # Contours are legend-toggled. Keep that legend outside the map on the
+        # left so it never covers the active field's colorbar on the right.
+        margin=dict(l=150, r=20, t=80, b=20),
+        legend=dict(
+            title=dict(text="Contours"),
+            x=-0.02, y=0.5, xanchor="right", yanchor="middle",
+            bgcolor="rgba(255,255,255,0.88)",
+            bordercolor="rgba(90,90,90,0.45)", borderwidth=1,
+        ),
         updatemenus=[dict(type="dropdown", direction="down", x=0.0, y=1.16,
                           xanchor="left", showactive=True, buttons=buttons)],
         annotations=[dict(x=0.0, y=1.20, xref="paper", yref="paper", showarrow=False,

@@ -409,7 +409,30 @@ def load_model_and_scalers(
 # Inference: shared helpers
 # ---------------------------------------------------------------------------
 def _resolve_device(device: Optional[str]) -> str:
-    return device or ("cuda" if torch.cuda.is_available() else "cpu")
+    requested = str(device or os.environ.get("PINN_DEVICE", "auto")).strip().lower()
+    if requested in ("", "auto"):
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"PINN_DEVICE={requested!r}, but PyTorch cannot access CUDA. "
+            "Check that the container has a GPU and a CUDA-enabled PyTorch wheel."
+        )
+    return requested
+
+
+def runtime_device_info() -> dict:
+    """Small JSON-safe runtime summary used by health checks and deployment tests."""
+    resolved = _resolve_device(None)
+    info = {
+        "requested": os.environ.get("PINN_DEVICE", "auto"),
+        "resolved": resolved,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "torch": str(torch.__version__),
+    }
+    if resolved.startswith("cuda"):
+        info["gpu"] = torch.cuda.get_device_name(torch.device(resolved))
+        info["cuda_runtime"] = str(torch.version.cuda)
+    return info
 
 
 def _global_bundle(cfd_dir: Path):

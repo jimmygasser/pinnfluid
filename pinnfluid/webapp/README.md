@@ -64,6 +64,9 @@ Environment variables (all optional):
 | `PINN_WEBAPP_MODELS`    | (all)   | comma-separated model ids to offer, e.g. the hybrid only      |
 | `PINN_WEBAPP_MAX_RUNS`  | 40      | keep at most this many saved runs (0 disables)                |
 | `PINN_WEBAPP_MAX_GB`    | 15      | keep saved runs under this size budget in GB (0 disables)     |
+| `PINN_WEBAPP_MAX_ACTIVE_JOBS` | 0 | reject jobs once this many are queued/running (0 disables)    |
+| `PINN_WEBAPP_RATE_LIMIT_JOBS` | 0 | process-wide job submissions per window (0 disables)          |
+| `PINN_WEBAPP_RATE_LIMIT_WINDOW` | 3600 | submission-limit window in seconds                       |
 | `PINN_DEVICE`           | auto    | force `cpu` or `cuda`                                         |
 | `PINN_WEBAPP_GITHUB_URL`| (placeholder) | the "About / GitHub" link in the app header            |
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
@@ -89,13 +92,15 @@ strict CSP.
 
 ## Security / deployment status
 
-Bound to `127.0.0.1` by default, single-user, **no authentication** — a local
-lab tool. Domain names are sanitised against path traversal and HTML endpoints
-escape user input, but there is no CSRF protection, rate limiting, or auth. Do
-**not** expose it to a network without a reverse proxy that adds those.
+Bound to `127.0.0.1` by default and **no authentication**. Domain names are
+sanitised against path traversal and HTML endpoints escape user input. The
+optional process-wide job limit prevents an unbounded prediction queue, but
+there is no CSRF protection and it is not DDoS-grade rate limiting. Follow
+`DEPLOY.md` before exposing the app publicly; use authentication or Cloud Armor
+if stronger per-user enforcement becomes necessary.
 Checkpoints are loaded with `torch.load(weights_only=False)` — only load
-checkpoints you trust. See the project's `GOING_ONLINE.md` for a safe
-public-hosting plan.
+checkpoints you trust. See the project's `DEPLOY.md` for the container and
+Cloud Run deployment procedure and the remaining public-hosting caveats.
 
 ## Units
 

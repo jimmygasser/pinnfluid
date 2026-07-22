@@ -1,0 +1,16 @@
+# Pinned web-app runtime. PyTorch is installed separately by each Dockerfile:
+# the CPU wheel in Dockerfile and the CUDA 12.1 wheel in Dockerfile.gpu.
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.1
+trimesh==4.8.3
+numpy-stl==3.2.0
+pyvista==0.44.1
+vtk==9.3.1
+rasterio==1.4.3
+pyproj==3.7.0
+requests==2.32.3
+matplotlib==3.9.2
+Pillow==11.0.0
+plotly==6.0.1
+PyYAML==6.0.2

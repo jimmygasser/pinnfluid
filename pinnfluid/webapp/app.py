@@ -70,6 +70,7 @@ from inference import (  # type: ignore  noqa: E402
     get_model_entry,
     list_models,
     predict_all,
+    runtime_device_info,
 )
 from plots import (  # type: ignore  noqa: E402
     generate_prediction_report,
@@ -131,17 +132,47 @@ _JOBS_LOCK = threading.Lock()
 # One heavy computation at a time: jobs queue on this gate instead of racing
 # over the GPU / workspace dirs.
 _PREDICT_GATE = threading.Semaphore(1)
+_JOB_SUBMISSIONS: list[float] = []
 
 
-def _job_create(kind: str) -> str:
-    jid = uuid.uuid4().hex[:12]
+def _env_nonnegative_int(name: str, default: int = 0) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return max(0, default)
+
+
+def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
+    """Apply process-local cost guards and atomically reserve a heavy job.
+
+    Cloud Run is deployed with one instance, so a global limit is deliberate:
+    it cannot be bypassed by changing a client IP header. Values of zero disable
+    the corresponding guard. The counters reset when the instance scales down.
+    """
+    max_active = _env_nonnegative_int("PINN_WEBAPP_MAX_ACTIVE_JOBS", 0)
+    rate_jobs = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_JOBS", 0)
+    window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
+    now = time.time()
     with _JOBS_LOCK:
+        active = sum(j.get("state") in ("queued", "running") for j in _JOBS.values())
+        if max_active and active >= max_active:
+            return None, "A prediction is already running. Try again when it finishes.", 30
+
+        if rate_jobs and window:
+            cutoff = now - window
+            _JOB_SUBMISSIONS[:] = [t for t in _JOB_SUBMISSIONS if t >= cutoff]
+            if len(_JOB_SUBMISSIONS) >= rate_jobs:
+                retry_after = max(1, int(_JOB_SUBMISSIONS[0] + window - now) + 1)
+                return None, "The public prediction limit has been reached. Try again later.", retry_after
+
+        _JOB_SUBMISSIONS.append(now)
+        jid = uuid.uuid4().hex[:12]
         _JOBS[jid] = {
             "id": jid, "kind": kind, "state": "queued",
             "message": "queued…", "created": time.time(),
             "result": None, "error": None,
         }
-    return jid
+    return jid, "", 0
 
 
 def _job_update(jid: str, **kw) -> None:
@@ -1984,6 +2015,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/healthz":
+            self._json({
+                "status": "ok",
+                "models": [m["id"] for m in list_models()],
+                "runtime": runtime_device_info(),
+            })
+            return
         if path == "/static/plotly.min.js":
             body = _plotly_js_bytes()
             self.send_response(200)
@@ -2298,8 +2336,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError as e:
                 self._json({"success": False, "error": str(e)}, status=400)
                 return
+            kind = "rose" if is_rose else "predict"
+            jid, message, retry_after = _job_admit_and_create(kind)
+            if jid is None:
+                self._json({
+                    "success": False,
+                    "error": message,
+                    "retry_after": retry_after,
+                }, status=429)
+                return
             runner = _run_rose if is_rose else _run_predict
-            jid = _job_create("rose" if is_rose else "predict")
 
             def _fn(progress, _body=body, _runner=runner, _name=name):
                 try:
@@ -2332,6 +2378,19 @@ def main() -> None:
     ap.add_argument("--no-browser", action="store_true", help="Don't auto-open the browser.")
     args = ap.parse_args()
 
+    # Containers can see the host CPU count even when cgroup quotas grant far
+    # fewer vCPUs. Explicitly matching PyTorch's thread pools to the deployed
+    # CPU allocation avoids severe oversubscription during 3D U-Net inference.
+    torch_threads = int(os.environ.get("PINN_WEBAPP_TORCH_THREADS", "0") or 0)
+    if torch_threads > 0:
+        import torch
+        torch.set_num_threads(torch_threads)
+        try:
+            torch.set_num_interop_threads(torch_threads)
+        except RuntimeError:
+            pass
+        print(f"[predict_web] PyTorch CPU threads: {torch_threads}")
+
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     Handler.page_html = _build_html()
 
@@ -2340,6 +2399,7 @@ def main() -> None:
     url = f"http://{shown_host}:{args.port}/"
     print(f"[predict_web] Serving at {url}  (bind {args.host}:{args.port})")
     print(f"[predict_web] Results root: {RESULTS_DIR}")
+    print(f"[predict_web] Runtime: {runtime_device_info()}")
     # Only auto-open a browser for a local bind, never inside a container.
     if not args.no_browser and args.host in ("127.0.0.1", "localhost"):
         def _open():

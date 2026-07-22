@@ -1,0 +1,26 @@
+.git
+.github
+.gitignore
+.gcloudignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+data/
+dem/
+results/
+wandb/
+*.log
+pinnfluid/webapp/results/
+pinnfluid/webapp/workspace/
+
+# Include only the four published final-model weights. Any unrelated local
+# checkpoints remain outside the image and build context.
+pinnfluid/webapp/checkpoints/*.pth
+pinnfluid/webapp/checkpoints/*.pt
+!pinnfluid/webapp/checkpoints/hybrid-stage1-292d.pth
+!pinnfluid/webapp/checkpoints/hybrid-stage2-292d.pth
+!pinnfluid/webapp/checkpoints/grid-unet-stage1-292d.pth
+!pinnfluid/webapp/checkpoints/grid-unet-stage2-292d.pth

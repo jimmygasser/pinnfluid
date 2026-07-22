@@ -56,6 +56,29 @@ def _downsample_terrain(elev: np.ndarray, x: np.ndarray, y: np.ndarray):
     return elev[::sy, ::sx], x[::sx], y[::sy], sx, sy
 
 
+def _surface_hover_text(*fields: np.ndarray, formatter) -> np.ndarray:
+    """Preformat Plotly Surface/Mesh3d hover labels.
+
+    Some Plotly.js Surface builds expose z but leave surfacecolor/customdata
+    template variables literal in the tooltip. Supplying text avoids that
+    browser-dependent path and also lets pressure views show real altitude.
+    """
+    arrays = [np.asarray(field) for field in fields]
+    if not arrays:
+        return np.empty(0, dtype=object)
+    shape = arrays[0].shape
+    if any(arr.shape != shape for arr in arrays[1:]):
+        raise ValueError("hover fields must have matching shapes")
+    flat = [arr.reshape(-1) for arr in arrays]
+    labels = []
+    for values in zip(*flat):
+        if all(np.isfinite(v) for v in values):
+            labels.append(formatter(*(float(v) for v in values)))
+        else:
+            labels.append("")
+    return np.asarray(labels, dtype=object).reshape(shape)
+
+
 def _wind_glyph_indices(valid: np.ndarray, n_target: int) -> np.ndarray:
     flat = np.flatnonzero(valid.reshape(-1))
     if flat.size == 0 or flat.size <= n_target:
@@ -172,7 +195,12 @@ def _snow_surface_trace(x, y, z_ds, speed_ds, *, lighting, lightposition, visibl
     return go.Surface(
         x=x, y=y, z=z_ds,
         surfacecolor=snow_ds,
-        customdata=speed_ds,
+        text=_surface_hover_text(
+            speed_ds,
+            formatter=lambda speed: (
+                f'Snow indicator (heuristic) - near-ground |U| = {speed:.1f} m/s'
+            ),
+        ),
         colorscale=_SNOW_COLORSCALE,
         cmin=-0.5, cmax=2.5,
         opacity=1.0, showscale=True,
@@ -185,8 +213,7 @@ def _snow_surface_trace(x, y, z_ds, speed_ds, *, lighting, lightposition, visibl
         contours=dict(z=dict(show=False)),
         name='Terrain (snow indicator)',
         legendgroup='terrain', showlegend=False,
-        hovertemplate=('Snow indicator (heuristic) — near-ground |U| = '
-                       '%{customdata:.1f} m/s<extra></extra>'),
+        hoverinfo='text',
         visible=visible,
     )
 
@@ -239,7 +266,11 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         contours=dict(z=dict(show=False)),
         name='Terrain (elevation)',
         legendgroup='terrain', showlegend=True,
-        hovertemplate='Terrain: %{surfacecolor:.1f} m<extra></extra>',
+        text=_surface_hover_text(
+            elev_real_ds,
+            formatter=lambda z: f'Terrain elevation: {z:.1f} m',
+        ),
+        hoverinfo='text',
         visible=True,
     )
     pressure_trace = go.Surface(
@@ -253,7 +284,11 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         contours=dict(z=dict(show=False)),
         name='Terrain (ground pressure)',
         legendgroup='terrain', showlegend=False,   # belongs to same legend item
-        hovertemplate='Terrain z=%{z:.1f} m  p=%{surfacecolor:+.2f} Pa<extra></extra>',
+        text=_surface_hover_text(
+            elev_real_ds, p_ground_ds,
+            formatter=lambda z, p: f'Terrain elevation: {z:.1f} m; p = {p:+.2f} Pa',
+        ),
+        hoverinfo='text',
         visible=False,
     )
     speed_ground_ds = _ground_speed_field(bundle, pred_flow)[::sy, ::sx]
@@ -1406,6 +1441,8 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         np.asarray(focus_bundle.y_coords, dtype=np.float32),
     )
     p_ground_ds = p_ground[::sy, ::sx]
+    z_off_struct = float(((saved_inputs.get('transform_meta') or {}).get('z_offset_applied')) or 0.0)
+    elev_real_ds = (elev_raw - z_off_struct)[::sy, ::sx]
     common_lighting = dict(ambient=0.55, diffuse=0.85, specular=0.12,
                            roughness=0.7, fresnel=0.1)
     common_lightpos = dict(x=50_000, y=50_000, z=100_000)
@@ -1421,14 +1458,16 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         contours=dict(z=dict(show=False)),
         name='Terrain (ground pressure)',
         legendgroup='terrain', showlegend=True,
-        hovertemplate='Terrain z=%{z:.1f} m  p=%{surfacecolor:+.2f} Pa<extra></extra>',
+        text=_surface_hover_text(
+            elev_real_ds, p_ground_ds,
+            formatter=lambda z, p: f'Terrain elevation: {z:.1f} m; p = {p:+.2f} Pa',
+        ),
+        hoverinfo='text',
         visible=True,
     )
     traces.append(terrain_p_trace)
     # Ground colour alternatives (toggled by the "Ground:" buttons): elevation
     # and the heuristic snow drift indicator. Same z geometry, hidden initially.
-    z_off_struct = float(((saved_inputs.get('transform_meta') or {}).get('z_offset_applied')) or 0.0)
-    elev_real_ds = (elev_raw - z_off_struct)[::sy, ::sx]
     terrain_elev_trace = go.Surface(
         x=x_ds, y=y_ds, z=elev_ds,
         surfacecolor=elev_real_ds,
@@ -1441,7 +1480,11 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         contours=dict(z=dict(show=False)),
         name='Terrain (elevation)',
         legendgroup='terrain', showlegend=False,
-        hovertemplate='Terrain: %{surfacecolor:.1f} m<extra></extra>',
+        text=_surface_hover_text(
+            elev_real_ds,
+            formatter=lambda z: f'Terrain elevation: {z:.1f} m',
+        ),
+        hoverinfo='text',
         visible=False,
     )
     traces.append(terrain_elev_trace)
@@ -1467,7 +1510,11 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2, roughness=0.6),
             name='Structure (predicted pressure)',
             legendgroup='structures', showlegend=True,
-            hovertemplate='Structure p = %{intensity:+.2f} Pa<extra></extra>',
+            text=_surface_hover_text(
+                p_vert,
+                formatter=lambda p: f'Structure p = {p:+.2f} Pa',
+            ),
+            hoverinfo='text',
         ))
     else:
         traces.extend(_structure_traces(structure_stl_path))
