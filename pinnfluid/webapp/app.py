@@ -275,9 +275,17 @@ def _validate_dem_bounds(body: dict) -> tuple[float, float, float, float]:
     if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
         raise ValueError("invalid WGS84 DEM bounds")
     e_min, n_min, e_max, n_max = wgs84_to_lv95(west, south, east, north)
-    max_extent = float(_env_nonnegative_int("PINN_WEBAPP_MAX_DOMAIN_M", 3000)) + 5.0
+    max_domain = float(_env_nonnegative_int("PINN_WEBAPP_MAX_DOMAIN_M", 3000))
+    # The browser requests a 1.5x DEM footprint so the square model domain
+    # remains covered after wind-alignment rotation. Permit up to 1.6x because
+    # the browser constructs that box approximately in WGS84 and the projected
+    # LV95 extent varies slightly across Switzerland.
+    max_extent = 1.6 * max_domain
     if e_max - e_min > max_extent or n_max - n_min > max_extent:
-        raise ValueError(f"DEM extent exceeds the {max_extent - 5:.0f} m public limit")
+        raise ValueError(
+            f"DEM extent exceeds the {max_extent:.0f} m preparation limit "
+            f"for a {max_domain:.0f} m model domain"
+        )
     return west, south, east, north
 
 

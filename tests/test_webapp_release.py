@@ -10,6 +10,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -174,6 +175,29 @@ class InputValidationTests(unittest.TestCase):
                 "domain_size": 1000,
                 "grid": {"rows": 11, "cols": 10},
             })
+
+    def test_dem_margin_allows_three_kilometre_domain(self):
+        bounds = {
+            "west": 6.0,
+            "south": 46.0,
+            "east": 7.0,
+            "north": 47.0,
+        }
+        with environment(PINN_WEBAPP_MAX_DOMAIN_M=3000):
+            with patch.object(
+                app,
+                "wgs84_to_lv95",
+                return_value=(0.0, 0.0, 4500.0, 4500.0),
+            ):
+                self.assertEqual(app._validate_dem_bounds(bounds), (6.0, 46.0, 7.0, 47.0))
+
+            with patch.object(
+                app,
+                "wgs84_to_lv95",
+                return_value=(0.0, 0.0, 4850.0, 4500.0),
+            ):
+                with self.assertRaisesRegex(ValueError, "4800 m preparation limit"):
+                    app._validate_dem_bounds(bounds)
 
 
 class PressureReferenceTests(unittest.TestCase):

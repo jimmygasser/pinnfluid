@@ -156,6 +156,10 @@ Three different controls are involved:
   and at most eight wind-rose sectors are enforced in-process. Request, upload,
   domain and structure-count limits are enforced server-side. Counters reset on
   scale-down; these are practical beta guards, not DDoS protection.
+  The browser requests a DEM footprint 1.5 times the model-domain size so a
+  wind-aligned 3 km square remains covered. The server permits up to 1.6 times
+  to absorb projection distortion; the model domain itself remains capped at
+  3 km.
 - **Cloud Billing:** create a project budget and email alerts in
   **Billing > Budgets & alerts**. Start with a small monthly budget such as
   USD/CHF 10 and alerts at 50%, 90%, and 100%. A budget alert notifies you; it
