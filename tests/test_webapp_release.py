@@ -369,6 +369,23 @@ class HttpBoundaryTests(unittest.TestCase):
         self.assertIn("global fluid-domain mean is set to zero", text)
         self.assertNotIn("Past runs", text)
 
+    def test_single_structure_yaw_updates_placed_geometry_and_invalidates_build(self):
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        text = body.decode("utf-8")
+        self.assertIn(
+            "structures.forEach(function(s) { s.yaw = yaw; });",
+            text,
+        )
+        self.assertIn(
+            "lastInputsSignature === _inputsSignature(body)",
+            text,
+        )
+        self.assertIn(
+            "0 = facing wind; applies to placed structures",
+            text,
+        )
+
     def test_run_index_is_hidden_by_default(self):
         with environment(PINN_WEBAPP_ENABLE_RUN_INDEX=0):
             status, _, _ = self.request("GET", "/runs")

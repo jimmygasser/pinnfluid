@@ -137,6 +137,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     padding:4px 8px; background:#f8f8f8; border-radius:3px;
     margin-bottom:3px; display:flex; justify-content:space-between; align-items:center;
   }
+  #struct-list .struct-item .struct-details { min-width:0; }
   #struct-list .struct-item .remove { color:#e53935; cursor:pointer; font-weight:bold; }
   #sel-info { font-size:11px; line-height:1.5; color:#555; min-height:18px; }
   #sel-info b { color:#333; }
@@ -254,7 +255,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div style="flex:1">
           <label>Yaw (deg)</label>
           <input type="number" id="structYaw" value="0" step="1"/>
-          <div class="help">0 = facing wind</div>
+          <div class="help">0 = facing wind; applies to placed structures</div>
         </div>
       </div>
       <p style="font-size:11px; color:#666; margin:4px 0;">
@@ -624,7 +625,8 @@ var redIcon = L.divIcon({
 
 function addStructAtLatLng(lat, lng) {
   var type = document.getElementById('structType').value;
-  var yaw = parseFloat(document.getElementById('structYaw').value) || 0;
+  var yaw = parseFloat(document.getElementById('structYaw').value);
+  if (!Number.isFinite(yaw)) yaw = 0;
   var typeName = document.getElementById('structType').selectedOptions[0].text;
   var idx = structures.length + 1;
   var label = typeName + ' #' + idx;
@@ -634,10 +636,12 @@ function addStructAtLatLng(lat, lng) {
   structures.push(entry);
   var popup = label + (crs
     ? '<br>CRS=(' + crs[0].toFixed(1) + ', ' + crs[1].toFixed(1) + ')'
-    : '<br>(' + lat.toFixed(5) + ', ' + lng.toFixed(5) + ')');
+    : '<br>(' + lat.toFixed(5) + ', ' + lng.toFixed(5) + ')') +
+    '<br>Yaw=' + yaw.toFixed(1) + '&deg;';
   var marker = L.marker([lat,lng], {icon:redIcon}).bindPopup(popup);
   structMarkers.addLayer(marker);
   renderStructList();
+  notifyStructureInputsChanged();
   updateBuildBtn();
   var locStr = crs
     ? 'CRS=(' + crs[0].toFixed(0) + ', ' + crs[1].toFixed(0) + ')'
@@ -668,6 +672,7 @@ function clearStructures() {
   structures = [];
   structMarkers.clearLayers();
   renderStructList();
+  notifyStructureInputsChanged();
   updateBuildBtn();
 }
 
@@ -675,11 +680,27 @@ function renderStructList() {
   var html = '';
   structures.forEach(function(s, i) {
     html += '<div class="struct-item">' +
-      '<span>' + s.label + '<br><small>lat=' + s.lat.toFixed(5) + ' lng=' + s.lng.toFixed(5) + ' yaw=' + s.yaw + '&deg;</small></span>' +
+      '<span class="struct-details">' + s.label + '<br><small>lat=' + s.lat.toFixed(5) +
+      ' lng=' + s.lng.toFixed(5) + ' yaw=' + Number(s.yaw || 0).toFixed(1) + '&deg;</small></span>' +
       '<span class="remove" onclick="removeStruct('+i+')">&times;</span></div>';
   });
   document.getElementById('struct-list').innerHTML = html || '<div style="color:#999; font-size:11px;">No structures placed yet</div>';
 }
+
+function notifyStructureInputsChanged() {
+  if (typeof markInputsDirty === 'function') markInputsDirty();
+}
+
+function syncPlacedStructureYaw() {
+  var yaw = parseFloat(document.getElementById('structYaw').value);
+  if (!Number.isFinite(yaw)) return;
+  structures.forEach(function(s) { s.yaw = yaw; });
+  renderStructList();
+  notifyStructureInputsChanged();
+}
+
+document.getElementById('structYaw').addEventListener('input', syncPlacedStructureYaw);
+document.getElementById('structYaw').addEventListener('change', syncPlacedStructureYaw);
 
 function removeStruct(i) {
   structures.splice(i, 1);
@@ -692,6 +713,7 @@ function removeStruct(i) {
     );
   });
   renderStructList();
+  notifyStructureInputsChanged();
   updateBuildBtn();
 }
 

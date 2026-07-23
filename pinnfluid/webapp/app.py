@@ -649,6 +649,7 @@ _PREDICT_SCRIPT = r"""
 </style>
 <script>
 var lastInputsDomain = null;   // most recent domain whose inputs are built
+var lastInputsSignature = null; // exact geometry/flow inputs used by the build
 var lastPredictDomain = null;  // most recent domain whose prediction finished
 
 function closePredictPanel() {
@@ -985,6 +986,29 @@ function _getConfirmBtns() {
           document.getElementById('btnConfirmGrid')].filter(Boolean);
 }
 
+function _inputsSignature(body) {
+  return JSON.stringify({
+    domain_name: body.domain_name,
+    domain_size: body.domain_size,
+    wind_from: body.wind_from,
+    flat_terrain: body.flat_terrain,
+    structures: body.structures,
+    center: body.center,
+    uref: body.uref,
+    zref: body.zref,
+    z0: body.z0,
+    flatten_ground: body.flatten_ground,
+    z_top_offset: body.z_top_offset,
+    grid: body.grid
+  });
+}
+
+function markInputsDirty() {
+  lastInputsDomain = null;
+  lastInputsSignature = null;
+  _setConfirmBtnsState('pending');
+}
+
 function _setConfirmBtnsDisabled(d) {
   _getConfirmBtns().forEach(function(b){ b.disabled = d; });
 }
@@ -1016,16 +1040,21 @@ function confirmStructures() {
     _setConfirmBtnsDisabled(false);
     if (d.success) {
       lastInputsDomain = body.domain_name;
+      lastInputsSignature = _inputsSignature(body);
       document.getElementById('btnBuild').disabled = false;
       _setConfirmBtnsState('ready');   // confirm button → green
       var gs = (d.grid_shape || []).join(' × ');
       setStatus('Structures confirmed. Inputs ready ('+gs+'). Now click Predict.','ok');
     } else {
+      lastInputsDomain = null;
+      lastInputsSignature = null;
       _setConfirmBtnsState('pending');
       setStatus('Build-inputs error: ' + d.error, 'err');
     }
   }).catch(function(e) {
     _setConfirmBtnsDisabled(false);
+    lastInputsDomain = null;
+    lastInputsSignature = null;
     _setConfirmBtnsState('pending');
     setStatus('Build-inputs error: '+e, 'err');
   });
@@ -1149,7 +1178,10 @@ function runPredict() {
   var singleOn = document.getElementById('enableSingle').checked;
   var gridOn   = document.getElementById('enableGrid').checked;
   var structsOn = singleOn || gridOn;
-  var inputsReady = (lastInputsDomain === body.domain_name);
+  var inputsReady = (
+    lastInputsDomain === body.domain_name &&
+    lastInputsSignature === _inputsSignature(body)
+  );
 
   if (structsOn && !inputsReady && !roseOn) {
     setStatus('Click Confirm structure(s) first.','err');
