@@ -2,8 +2,8 @@
 
 A steady-RANS surrogate that predicts the 3D wind and pressure field around
 built structures embedded in real terrain, in seconds instead of hours. The
-model is a two-stage cascade: a Stage-1 background over the full domain at
-about 30 m resolution, refined by a Stage-2 network over the region of interest
+model is a two-stage cascade. A Stage 1 background over the full domain at
+about 30 m resolution, refined by a Stage 2 network over the region of interest
 at about 0.5 m resolution. Two architectures are provided:
 
 - **Hybrid cascade** — a point-wise MLP head with a 2D CNN terrain encoder and
@@ -98,14 +98,14 @@ python pinnfluid/webapp/fetch_checkpoints.py     # or download them manually
 python pinnfluid/webapp/app.py                   # serves http://127.0.0.1:8779
 ```
 
-Pick a Swiss location (or import a DEM), place structures, predict the field,
-inspect plots and 3D views, export VTK/NPZ/PDF. See
+Pick a Swiss location (or import a DEM), place structures interactively, predict the field,
+inspect plots and 3D views, export VTK/NPZ/report PDF. See
 [`pinnfluid/webapp/README.md`](pinnfluid/webapp/README.md) for the full
 feature list and the important security/deployment caveats.
 
 ## Reproducing the two final models
 
-The training dataset is not currently distributed publicly (see
+The training dataset is not yet currently distributed publicly (see
 [`DATA.md`](DATA.md)). Once the CFD data is available under `data/cfd/`, create
 the mirrored training root:
 
