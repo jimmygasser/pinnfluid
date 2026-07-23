@@ -634,12 +634,7 @@ function addStructAtLatLng(lat, lng) {
   var entry = {lat:lat, lng:lng, type:type, yaw:yaw, label:label};
   if (crs) { entry.crs_x = crs[0]; entry.crs_y = crs[1]; }
   structures.push(entry);
-  var popup = label + (crs
-    ? '<br>CRS=(' + crs[0].toFixed(1) + ', ' + crs[1].toFixed(1) + ')'
-    : '<br>(' + lat.toFixed(5) + ', ' + lng.toFixed(5) + ')') +
-    '<br>Yaw=' + yaw.toFixed(1) + '&deg;';
-  var marker = L.marker([lat,lng], {icon:redIcon}).bindPopup(popup);
-  structMarkers.addLayer(marker);
+  renderStructMarkers();
   renderStructList();
   notifyStructureInputsChanged();
   updateBuildBtn();
@@ -687,6 +682,20 @@ function renderStructList() {
   document.getElementById('struct-list').innerHTML = html || '<div style="color:#999; font-size:11px;">No structures placed yet</div>';
 }
 
+function renderStructMarkers() {
+  structMarkers.clearLayers();
+  structures.forEach(function(s) {
+    var popup = s.label;
+    if (Number.isFinite(s.crs_x) && Number.isFinite(s.crs_y)) {
+      popup += '<br>CRS=(' + s.crs_x.toFixed(1) + ', ' + s.crs_y.toFixed(1) + ')';
+    } else {
+      popup += '<br>(' + s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) + ')';
+    }
+    popup += '<br>Yaw=' + Number(s.yaw || 0).toFixed(1) + '&deg;';
+    structMarkers.addLayer(L.marker([s.lat, s.lng], {icon:redIcon}).bindPopup(popup));
+  });
+}
+
 function notifyStructureInputsChanged() {
   if (typeof markInputsDirty === 'function') markInputsDirty();
 }
@@ -695,6 +704,7 @@ function syncPlacedStructureYaw() {
   var yaw = parseFloat(document.getElementById('structYaw').value);
   if (!Number.isFinite(yaw)) return;
   structures.forEach(function(s) { s.yaw = yaw; });
+  renderStructMarkers();
   renderStructList();
   notifyStructureInputsChanged();
 }
@@ -704,14 +714,10 @@ document.getElementById('structYaw').addEventListener('change', syncPlacedStruct
 
 function removeStruct(i) {
   structures.splice(i, 1);
-  structMarkers.clearLayers();
   structures.forEach(function(s, idx) {
     s.label = s.label.split(' #')[0] + ' #' + (idx+1);
-    structMarkers.addLayer(
-      L.marker([s.lat,s.lng], {icon:redIcon})
-        .bindPopup(s.label + '<br>(' + s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) + ')')
-    );
   });
+  renderStructMarkers();
   renderStructList();
   notifyStructureInputsChanged();
   updateBuildBtn();
