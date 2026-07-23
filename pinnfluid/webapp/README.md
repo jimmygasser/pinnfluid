@@ -1,5 +1,7 @@
 # webapp — interactive wind-field prediction app (BETA)
 
+**Live application:** [pinnfluid.ch](https://pinnfluid.ch)
+
 > **Beta / test phase.** This app is a research demo, not a validated
 > engineering tool. Its experimental loads, pressures and snow indicators are
 > pre-design screening estimates, not code-verified design values. Do not use

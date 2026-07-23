@@ -1,5 +1,7 @@
 # pinnfluid — physics-informed wind and pressure surrogate over terrain and structures
 
+[**Launch the interactive application**](https://pinnfluid.ch)
+
 A steady-RANS surrogate that predicts the 3D wind and pressure field around
 built structures embedded in real terrain, in seconds instead of hours. The
 model is a two-stage cascade. A Stage 1 background over the full domain at
