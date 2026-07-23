@@ -3,7 +3,8 @@
 > **Beta / test phase.** This app is a research demo, not a validated
 > engineering tool. Its experimental loads, pressures and snow indicators are
 > pre-design screening estimates, not code-verified design values. Do not use
-> it as the sole basis for any real design decision.
+> it as the sole basis for any real design decision. Displayed pressures are
+> relative, with the global fluid-domain mean set to zero for each prediction.
 
 A local web app around the pinnfluid surrogate: pick a Swiss location (or
 import a DEM), place structures, predict the 3D wind and pressure field in
@@ -37,7 +38,7 @@ are missing are hidden automatically. See `checkpoints/README.md`.
 
 - **Interactive map** — the quick-look result, embedded as the first thing shown
   after a prediction. A top-down Plotly heatmap of wind speed at a selectable
-  height above ground (terrain-following), plus surface pressure and terrain
+  height above ground (terrain-following), plus relative pressure and terrain
   altitude, with faint terrain contours. Oriented north-up to match the PDF
   report. Hover for exact values, zoom and pan; refined ROIs are overlaid at
   their true position.
@@ -114,10 +115,12 @@ Cloud Run deployment procedure and the remaining public-hosting caveats.
 
 ## Units
 
-The plots, the interactive map, and the PDF report show pressure in **Pa**,
-gauge-referenced to the outlet. The conversion uses ISA air density evaluated at
-the site's mean altitude (so it adapts with elevation), stated in the report.
+The plots, interactive map, 3D views, and PDF report show **relative pressure**
+in Pa. One constant is used throughout each prediction: the arithmetic mean
+over valid global fluid cells is set to zero. Wind-rose sectors are independent
+predictions and therefore each use their own reference. The Pa conversion uses
+ISA air density evaluated at the site's mean altitude, stated in the report.
 
 Internally the model outputs kinematic pressure (p/rho, m²/s², the OpenFOAM
-convention); only the raw VTK/NPZ exports keep those kinematic units, so
-downstream tools can apply their own density.
+convention). Saved fields and VTK/NPZ exports retain that unmodified raw model
+output so downstream tools can choose their own pressure reference and density.

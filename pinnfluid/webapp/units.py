@@ -1,10 +1,11 @@
 """Display-side unit helpers for the predict_web app.
 
 The trained models output kinematic pressure (p/rho, m^2/s^2) — the OpenFOAM
-simpleFoam convention. For user-facing labels we want Pa, so we multiply by
-air density at the point of display. The underlying model output, scalers,
-and stored .npz/.vtk exports remain in kinematic units so engineering
-post-processing can choose its own rho.
+simpleFoam convention. User-facing products first subtract one pressure
+reference shared by the global and ROI fields, then multiply by air density.
+The underlying model output, scalers, and stored .npz/.vtk exports remain raw
+and in kinematic units so engineering post-processing can choose its own gauge
+and density.
 """
 
 from __future__ import annotations

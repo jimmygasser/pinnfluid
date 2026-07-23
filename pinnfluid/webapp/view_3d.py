@@ -1,7 +1,7 @@
 """Standalone 3D viewer (Plotly) for a predicted flow field.
 
 Self-contained HTML page with:
-  - terrain Surface coloured either by elevation or by **ground pressure**
+  - terrain Surface coloured either by elevation or by **relative pressure**
     (toggle button on the figure)
   - structure meshes (Mesh3d parsed from structure.stl)
   - velocity glyphs (Cone) at 4 pre-rendered densities; switchable via slider
@@ -222,7 +222,7 @@ def _snow_surface_trace(x, y, z_ds, speed_ds, *, lighting, lightposition, visibl
 # Trace builders
 # ---------------------------------------------------------------------------
 def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
-    """Three Surface traces: coloured by elevation (default), ground pressure,
+    """Three Surface traces: coloured by elevation (default), relative pressure,
     or the heuristic snow drift indicator.
 
     `z_offset_applied` is the *additive* shift recorded by domain_builder:
@@ -242,7 +242,8 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         np.asarray(bundle.y_coords, dtype=np.float32),
     )
     elev_real_ds = elev_real[::sy, ::sx]
-    p_ground = _ground_pressure_field(bundle, pred_flow)       # (ny, nx)
+    from units import RHO_AIR  # type: ignore  noqa: E402
+    p_ground = RHO_AIR * _ground_pressure_field(bundle, pred_flow)  # Pa, (ny, nx)
     p_ground_ds = p_ground[::sy, ::sx]
     finite_p = np.isfinite(p_ground_ds)
     if bool(np.any(finite_p)):
@@ -279,14 +280,16 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         colorscale='RdBu_r',
         cmin=-p_lim, cmax=p_lim,
         opacity=1.0, showscale=True,
-        colorbar=dict(title='Ground p (Pa)', x=0.0, xanchor='left', len=0.4, y=0.5),
+        colorbar=dict(title='Relative p (Pa)', x=0.0, xanchor='left', len=0.4, y=0.5),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
-        name='Terrain (ground pressure)',
+        name='Terrain (relative pressure)',
         legendgroup='terrain', showlegend=False,   # belongs to same legend item
         text=_surface_hover_text(
             elev_real_ds, p_ground_ds,
-            formatter=lambda z, p: f'Terrain elevation: {z:.1f} m; p = {p:+.2f} Pa',
+            formatter=lambda z, p: (
+                f'Terrain elevation: {z:.1f} m; relative p = {p:+.2f} Pa'
+            ),
         ),
         hoverinfo='text',
         visible=False,
@@ -771,7 +774,7 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
     traces: list = []
     trace_groups: dict[str, list[int]] = {'glyphs': [], 'streams': []}
 
-    # --- Terrain (two traces, one for elevation, one for ground pressure) ---
+    # --- Terrain (elevation, relative pressure and snow traces) ---
     z_offset_applied = float(((saved_inputs.get('transform_meta') or {}).get('z_offset_applied')) or 0.0)
     terrain = _terrain_traces(bundle, pred_flow, z_offset_applied=z_offset_applied)
     terrain_idx = list(range(len(traces), len(traces) + len(terrain)))
@@ -939,7 +942,7 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
             args=[{'visible': [True, False, False]}, terrain_idx],
         ),
         dict(
-            label='Color: ground pressure', method='restyle',
+            label='Color: relative pressure', method='restyle',
             args=[{'visible': [False, True, False]}, terrain_idx],
         ),
         dict(
@@ -1408,10 +1411,10 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
 
     traces: list = []
 
-    # Display all pressure values as Pa (gauge, p_ref = outlet). See units.py.
+    # Display pressure in Pa after the global fluid-domain mean was removed.
     from units import RHO_AIR  # type: ignore  noqa: E402
 
-    # --- Ground pressure field (for shared p scale). Convert to Pa for display. ---
+    # --- Ground relative pressure (for the shared pressure scale). ---
     p_ground = RHO_AIR * _ground_pressure_field(focus_bundle, focus_pred)
 
     # --- Structure vertices + per-vertex pressure. Filter the STL to only
@@ -1433,7 +1436,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     # Single symmetric colour scale shared by terrain ground + structure.
     p_lim = _shared_pressure_limits(p_ground, p_vert)
 
-    # --- Terrain (downsampled, coloured by ground pressure with shared scale) ---
+    # --- Terrain (downsampled, coloured by relative pressure) ---
     elev_raw = np.asarray(focus_bundle.terrain_raw['elevation'])  # (ny, nx)
     elev_ds, x_ds, y_ds, sx, sy = _downsample_terrain(
         elev_raw,
@@ -1452,15 +1455,17 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         colorscale='RdBu_r',
         cmin=-p_lim, cmax=p_lim,
         opacity=1.0, showscale=True,
-        colorbar=dict(title='p (Pa)', x=0.0, xanchor='left',
+        colorbar=dict(title='Relative p (Pa)', x=0.0, xanchor='left',
                       len=0.5, y=0.5),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
-        name='Terrain (ground pressure)',
+        name='Terrain (relative pressure)',
         legendgroup='terrain', showlegend=True,
         text=_surface_hover_text(
             elev_real_ds, p_ground_ds,
-            formatter=lambda z, p: f'Terrain elevation: {z:.1f} m; p = {p:+.2f} Pa',
+            formatter=lambda z, p: (
+                f'Terrain elevation: {z:.1f} m; relative p = {p:+.2f} Pa'
+            ),
         ),
         hoverinfo='text',
         visible=True,
@@ -1508,11 +1513,11 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             opacity=1.0,
             flatshading=False,
             lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2, roughness=0.6),
-            name='Structure (predicted pressure)',
+            name='Structure (relative pressure)',
             legendgroup='structures', showlegend=True,
             text=_surface_hover_text(
                 p_vert,
-                formatter=lambda p: f'Structure p = {p:+.2f} Pa',
+                formatter=lambda p: f'Structure relative p = {p:+.2f} Pa',
             ),
             hoverinfo='text',
         ))
@@ -1524,7 +1529,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     # The model output is noisy at exact face vertices (mesh corners pin
     # nearest-cell sampling). To pick a representative peak, we scan the
     # fluid volume within ~1 m of each wall (using phi_wall) inside the
-    # structure's AABB and report the highest / lowest gauge pressure
+    # structure's AABB and report the highest / lowest relative pressure
     # found there. The marker is placed at that physical cell.
     #
     # Each pair (max + min) is rendered as a *separate* legendgroup so
@@ -1549,7 +1554,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         # Uref for Cp
         abl_struct = meta_struct.get('ABL', {}) if isinstance(meta_struct, dict) else {}
         u_ref = float(abl_struct.get('Uref', abl_struct.get('Uref_mps', 1.0)) or 1.0)
-        q_kin = 0.5 * max(u_ref, 1e-6) ** 2  # m^2/s^2, denominator for Cp
+        from units import cp_from_kinematic  # type: ignore  noqa: E402
         # phi_wall: |phi| <= max_shell => inside the 1m shell around walls.
         phi = ri.phi_wall
         max_shell_m = 1.0
@@ -1608,9 +1613,9 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                 yy = float(np.clip(yq, ymin, ymax))
                 zz = float(np.clip(zq, zmin, zmax))
                 p_pa_val = float(p_pa_3d[ii, jj, kk])
-                cp_val = float(p_kin_3d[ii, jj, kk] / q_kin)
+                cp_val = float(cp_from_kinematic(p_kin_3d[ii, jj, kk], u_ref))
                 x_acc.append(xx); y_acc.append(yy); z_acc.append(zz)
-                label = 'max load' if kind == 'max' else 'max suction'
+                label = 'max relative pressure' if kind == 'max' else 'max relative suction'
                 text_acc.append(f'{label}: {p_pa_val:+.1f} Pa  (Cp = {cp_val:+.2f})')
         if mx_x:
             traces.append(go.Scatter3d(
@@ -1624,7 +1629,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                 text=mx_text + mn_text,
                 textposition='top center',
                 textfont=dict(size=11, color='#222'),
-                name='Max load / suction (Pa, Cp)',
+                name='Relative pressure extrema (Pa, Cp)',
                 # Separate legendgroup so unticking these doesn't hide the
                 # structure mesh.
                 legendgroup='pressure_markers', showlegend=True,
@@ -1866,7 +1871,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             dict(
                 type='buttons', direction='right',
                 buttons=[
-                    dict(label='Ground: pressure', method='restyle',
+                    dict(label='Ground: relative pressure', method='restyle',
                          args=[{'visible': [True, False, False]}, terrain_idx]),
                     dict(label='Ground: elevation', method='restyle',
                          args=[{'visible': [False, True, False]}, terrain_idx]),

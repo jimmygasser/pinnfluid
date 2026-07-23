@@ -92,6 +92,10 @@ from results_io import (  # type: ignore  noqa: E402
 )
 from view_3d import write_3d_html, write_structure_3d_html  # type: ignore  noqa: E402
 from interactive_map import write_map_html  # type: ignore  noqa: E402
+from pressure_reference import (  # type: ignore  noqa: E402
+    global_pressure_reference_kinematic,
+    presentation_prediction,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -601,18 +605,18 @@ _PREDICT_SCRIPT = r"""
   </div>
   <div id="predict-meta" style="font-size:12px; color:#555; margin-bottom:12px;"></div>
   <div id="predict-actions" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px;">
-    <a id="mapBtn"    class="rprt-btn" style="background:#00897b;" href="#" target="_blank" title="Interactive 2D map (Plotly): top-down wind-speed / pressure / terrain heatmap. Hover for exact values, zoom and pan.">🗺️ Interactive map</a>
+    <a id="mapBtn"    class="rprt-btn" style="background:#00897b;" href="#" target="_blank" title="Interactive 2D map (Plotly): top-down wind-speed / relative-pressure / terrain heatmap. Hover for exact values, zoom and pan.">🗺️ Interactive map</a>
     <a id="dlPdfBtn"  class="rprt-btn" style="background:#c62828;" href="#">📄 Download PDF report</a>
     <a id="dlVtkBtn"  class="rprt-btn" style="background:#1565c0;" href="#" title="Full 3D flow field as VTK structured grid (open in ParaView).">📦 Export VTK (.vtk.zip)</a>
     <a id="dlNpzBtn"  class="rprt-btn" style="background:#2e7d32;" href="#" title="Full 3D flow field as NumPy compressed arrays.">🧮 Export NumPy (.npz.zip)</a>
     <a id="view3dBtn" class="rprt-btn" style="background:#6a1b9a;" href="#" target="_blank" title="Interactive 3D viewer (Plotly): terrain + structures + wind glyphs + streamtubes.">🌐 Open 3D view</a>
-    <a id="view3dStrBtn" class="rprt-btn" style="background:#8e24aa;" href="#" target="_blank" title="3D view focused on the structure(s): structure surface coloured by predicted pressure, ground pressure, light streamlines.">🏛️ Open 3D structure view</a>
+    <a id="view3dStrBtn" class="rprt-btn" style="background:#8e24aa;" href="#" target="_blank" title="3D view focused on the structure(s): structure and ground coloured by relative pressure, with light streamlines.">🏛️ Open 3D structure view</a>
     <a id="dlPlotsBtn" class="rprt-btn" style="background:#37474f;" href="#">🖼️ Plots only (.zip)</a>
   </div>
   <iframe id="predict-map" title="Interactive wind and pressure map"
           style="width:100%; height:72vh; border:1px solid #ddd; border-radius:6px; margin-bottom:8px; display:none;"></iframe>
   <div id="predict-map-hint" style="font-size:11px; color:#888; margin-bottom:16px; display:none;">
-    Use the <b>View</b> dropdown (top-left of the map) to switch height above ground, pressure, or terrain. Hover for exact values; drag to zoom. Summary numbers and static plots are in the PDF report.
+    Use the <b>View</b> dropdown (top-left of the map) to switch height above ground, relative pressure, or terrain. Hover for exact values; drag to zoom. Summary numbers and static plots are in the PDF report.
   </div>
   <div id="predict-values-toggle" style="margin:6px 0;">
     <button class="rprt-btn" style="background:#607d8b;" onclick="toggleValues()">Show summary values ▾</button>
@@ -701,12 +705,14 @@ function renderStats(stats, payload) {
   }
   html += '</table>';
 
-  // Pressure
-  html += '<h3>Pressure</h3>';
+  // Relative pressure
+  html += '<h3>Relative pressure</h3>';
+  html += '<div style="font-size:11px;color:#666;margin:-4px 0 7px;">'
+       + 'One pressure reference is used throughout this prediction: the global fluid-domain mean is set to zero.</div>';
   html += '<table>';
   html += '<tr><th style="width:280px;">Quantity</th><th style="width:120px;">Value</th><th>Location</th></tr>';
-  if (g.max_p) html += _row('Max pressure', g.max_p.value_pa.toFixed(2)+' Pa', g.max_p);
-  if (g.min_p) html += _row('Min pressure', g.min_p.value_pa.toFixed(2)+' Pa', g.min_p);
+  if (g.max_p) html += _row('Max relative pressure', g.max_p.value_pa.toFixed(2)+' Pa', g.max_p);
+  if (g.min_p) html += _row('Min relative pressure', g.min_p.value_pa.toFixed(2)+' Pa', g.min_p);
   html += '</table>';
 
   // Domain
@@ -732,13 +738,13 @@ function renderStats(stats, payload) {
       html += '<tr><th style="width:280px;">Quantity</th><th style="width:120px;">Value</th><th>Location</th></tr>';
       if (r.grid_shape) html += '<tr><td>Grid</td><td class="num">'+r.grid_shape.join(' × ')+'</td><td>'+(r.n_fluid_cells||0).toLocaleString()+' fluid cells</td></tr>';
       if (r.max_umag) html += _row('Max wind speed', r.max_umag.value_mps.toFixed(2)+' m/s', r.max_umag);
-      if (r.max_p) html += _row('Max pressure', r.max_p.value_pa.toFixed(2)+' Pa', r.max_p);
-      if (r.min_p) html += _row('Min pressure', r.min_p.value_pa.toFixed(2)+' Pa', r.min_p);
-      if (r.max_p_near_wall) html += _row('Max pressure on structure surface',
+      if (r.max_p) html += _row('Max relative pressure', r.max_p.value_pa.toFixed(2)+' Pa', r.max_p);
+      if (r.min_p) html += _row('Min relative pressure', r.min_p.value_pa.toFixed(2)+' Pa', r.min_p);
+      if (r.max_p_near_wall) html += _row('Max relative pressure on structure surface',
                                           r.max_p_near_wall.value_pa.toFixed(2)+' Pa',
                                           r.max_p_near_wall);
       if (r.p_near_wall_range_pa) {
-        html += '<tr><td>Pressure on structure surface (range)</td><td class="num">'
+        html += '<tr><td>Relative pressure on structure surface (range)</td><td class="num">'
              + r.p_near_wall_range_pa.min.toFixed(2)+' .. '+r.p_near_wall_range_pa.max.toFixed(2)+' Pa</td><td>—</td></tr>';
       }
       html += '</table>';
@@ -1079,7 +1085,7 @@ function renderRose(payload) {
        + (payload.geometry_reference_dir_deg != null ? payload.geometry_reference_dir_deg.toFixed(0)+'°' : 'reference') + '). '
        + (payload.governing_rule || '') + '</div>';
   html += '<h3>Per-sector summary</h3>';
-  html += '<table><tr><th>Wind from [°]</th><th>Max |U| near ground [m/s]</th><th>Mean |U| at Z<sub>ref</sub> [m/s]</th><th>Max experimental |F<sub>drag</sub>| [N]</th><th>Max suction [Pa]</th><th></th></tr>';
+  html += '<table><tr><th>Wind from [°]</th><th>Max |U| near ground [m/s]</th><th>Mean |U| at Z<sub>ref</sub> [m/s]</th><th>Max experimental |F<sub>drag</sub>| [N]</th><th>Max relative suction [Pa]</th><th></th></tr>';
   (payload.sectors || []).forEach(function(s) {
     var isWorst = (s.domain === worst);
     var dq = encodeURIComponent(s.domain);
@@ -1098,7 +1104,7 @@ function renderRose(payload) {
          + '</tr>';
   });
   html += '</table>';
-  html += '<div style="font-size:11px;color:#888;margin-top:6px;">Full artifacts are kept for every direction (~50–100 MB each). The PDF button above is the combined multi-direction report; per-direction PDFs are in the table. The rose summary JSON is in the results folder.</div>';
+  html += '<div style="font-size:11px;color:#888;margin-top:6px;">Each sector uses its own pressure reference, with its global fluid-domain mean set to zero. Full artifacts are kept for every direction (~50–100 MB each). The PDF button above is the combined multi-direction report; per-direction PDFs are in the table.</div>';
   statsDiv.innerHTML = html;
   statsDiv.style.display = 'block';
   document.querySelector('#predict-values-toggle button').innerHTML = 'Hide summary values ▴';
@@ -1452,6 +1458,14 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     model_id = str(body.get("model") or "").strip() or None
     _p(f"running {_model_name(model_id)}…")
     infer_out = predict_all(cfd_dir, model_id=model_id)
+    pressure_reference_kinematic = global_pressure_reference_kinematic(
+        infer_out["pred_flow"],
+        infer_out["bundle"].is_fluid,
+    )
+    display_out = presentation_prediction(
+        infer_out,
+        pressure_reference_kinematic,
+    )
     t_infer = time.time() - t0
 
     # transform.json from the workspace (pre-cleanup) — LV95 georeferencing +
@@ -1485,9 +1499,9 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     plots_dir.mkdir(parents=True, exist_ok=True)
     plot_report = generate_prediction_report(
         cfd_dir,
-        infer_out["pred_flow"],
+        display_out["pred_flow"],
         out_dir=plots_dir,
-        roi_pred_flows=infer_out.get("roi_preds") or None,
+        roi_pred_flows=display_out.get("roi_preds") or None,
         sampling_points=sampling_points_local or None,
     )
     t_plots = time.time() - t0 - t_infer
@@ -1567,6 +1581,7 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
             case_dir=case_dir,
             cfd_dir=cfd_dir,
             predict_out=infer_out,
+            pressure_reference_kinematic=pressure_reference_kinematic,
             selection_path=selection_path if selection_path.exists() else None,
         )
     except Exception as e:
@@ -1581,14 +1596,15 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     try:
         stats = compute_summary_stats(
             infer_out["bundle"],
-            infer_out["pred_flow"],
+            display_out["pred_flow"],
             roi_bundles=infer_out.get("roi_bundles"),
-            roi_pred_flows=infer_out.get("roi_preds"),
+            roi_pred_flows=display_out.get("roi_preds"),
             model_name=_model_name(model_id),
             transform_meta=transform_meta,
             runtime_s=runtime_s,
             structure_stl_path=structure_stl if structure_stl.exists() else None,
             sampling_points=sampling_points_local or None,
+            pressure_reference_kinematic=pressure_reference_kinematic,
         )
         if uncert_stats:
             stats["uncertainty"] = uncert_stats
@@ -2096,13 +2112,14 @@ How to use in ParaView:
          Filters -> Threshold -> Scalars: is_fluid -> Min=1 -> Max=1 -> Apply
   3. To draw streamlines on the predicted velocity field:
          Filters -> Stream Tracer -> Vectors: U -> seed type: Point Cloud
-  4. The pressure field is in the scalar `p`; magnitude is in `Umag`.
+  4. The raw model pressure field is in the scalar `p`; magnitude is in `Umag`.
 
 Units:
-  U / Umag are in m/s. `p` is the KINEMATIC pressure (m^2/s^2, the OpenFOAM
-  simpleFoam convention), gauge-referenced to the domain outlet. Multiply by
-  the air density to get Pa (rho ~ 1.22 kg/m3 at sea level, ~1.0-1.1 kg/m3
-  at alpine sites; the PDF report states the ISA density used for its values).
+  U / Umag are in m/s. `p` is the RAW KINEMATIC model output (m^2/s^2, the
+  OpenFOAM simpleFoam convention). The app's maps, plots, 3D views and PDF show
+  relative pressure after subtracting the global fluid-cell mean; this export
+  deliberately preserves the unmodified output. Multiply `p` by air density
+  to get Pa.
 
 Local frame:
   All coordinates are in the local domain frame (metres from the SW corner).
@@ -2182,7 +2199,18 @@ def _ensure_map_html(name: str) -> Path:
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
     cfd_dir = RESULTS_DIR / name / "inputs" / "cfd"
-    write_map_html(out_path, case_dir=cfd_dir, domain_name=name)
+    saved = load_saved_inputs(RESULTS_DIR, name)
+    display = presentation_prediction(
+        saved,
+        saved["pressure_reference_kinematic"],
+    )
+    write_map_html(
+        out_path,
+        case_dir=cfd_dir,
+        domain_name=name,
+        pred_flow=display["pred_flow"],
+        roi_pred_flows=display.get("roi_preds"),
+    )
     return out_path
 
 
@@ -2194,6 +2222,10 @@ def _ensure_3d_html(name: str) -> Path:
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
     saved = load_saved_inputs(RESULTS_DIR, name)
+    saved = presentation_prediction(
+        saved,
+        saved["pressure_reference_kinematic"],
+    )
     structure_stl = RESULTS_DIR / name / "inputs" / "case" / "triSurface" / "structure.stl"
     write_3d_html(
         out_path,
@@ -2224,6 +2256,10 @@ def _ensure_structure_3d_html(name: str, roi_label: Optional[str] = None) -> Pat
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
     saved = load_saved_inputs(RESULTS_DIR, name)
+    saved = presentation_prediction(
+        saved,
+        saved["pressure_reference_kinematic"],
+    )
     structure_stl = RESULTS_DIR / name / "inputs" / "case" / "triSurface" / "structure.stl"
     write_structure_3d_html(
         out_path,

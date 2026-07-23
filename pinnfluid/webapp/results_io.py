@@ -12,6 +12,7 @@ inputs (`cfd_dir`) are normally cleaned up. We mirror the parts we need under
 Layout (mirrors the cfd_dir layout so `_load_grid_bundle` works directly):
 
   RESULTS_DIR/<domain>/inputs/
+    presentation.json                 # display-only pressure reference
     cfd/
       meta.json
       terrain.npz
@@ -146,6 +147,7 @@ def save_inputs_and_predictions(
     case_dir: Path,
     cfd_dir: Path,
     predict_out: dict,
+    pressure_reference_kinematic: float,
     selection_path: Optional[Path] = None,
 ) -> Path:
     """Mirror the bits of case_dir/cfd_dir we want to keep, then overwrite
@@ -187,6 +189,23 @@ def save_inputs_and_predictions(
 
     if selection_path and Path(selection_path).exists():
         shutil.copy2(selection_path, saved_root / "selection.json")
+
+    from pressure_reference import (  # type: ignore
+        PRESSURE_REFERENCE_CONVENTION,
+        PRESSURE_REFERENCE_LABEL,
+    )
+    (saved_root / "presentation.json").write_text(
+        json.dumps(
+            {
+                "pressure_reference_convention": PRESSURE_REFERENCE_CONVENTION,
+                "pressure_reference_label": PRESSURE_REFERENCE_LABEL,
+                "pressure_reference_kinematic": float(pressure_reference_kinematic),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     # Keep results/ within its retention budget (never removes the run we just
     # saved). Best-effort: a retention failure must not fail the prediction.
@@ -230,12 +249,32 @@ def load_saved_inputs(results_root: Path, domain_name: str) -> dict:
         except Exception:
             transform_meta = None
 
+    presentation_meta = {}
+    presentation_path = _saved_root(results_root, domain_name) / "presentation.json"
+    if presentation_path.exists():
+        try:
+            presentation_meta = json.loads(presentation_path.read_text())
+        except Exception:
+            presentation_meta = {}
+    pressure_reference = presentation_meta.get("pressure_reference_kinematic")
+    if pressure_reference is None:
+        from pressure_reference import global_pressure_reference_kinematic  # type: ignore
+        pressure_reference = global_pressure_reference_kinematic(
+            g_bundle.flow,
+            g_bundle.is_fluid,
+        )
+
     return {
         "bundle": g_bundle,
         "pred_flow": g_bundle.flow,
         "roi_bundles": roi_bundles,
         "roi_preds": {label: rb.flow for label, rb in roi_bundles.items()},
         "transform_meta": transform_meta,
+        "pressure_reference_kinematic": float(pressure_reference),
+        "pressure_reference_convention": presentation_meta.get(
+            "pressure_reference_convention",
+            "global_fluid_arithmetic_mean_zero",
+        ),
     }
 
 

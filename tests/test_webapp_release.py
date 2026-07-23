@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +24,11 @@ for path in (
     sys.path.insert(0, str(path))
 
 from webapp import app  # noqa: E402
+from webapp.pressure_reference import (  # noqa: E402
+    global_pressure_reference_kinematic,
+    presentation_prediction,
+)
+from webapp.results_io import save_inputs_and_predictions  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -166,6 +176,79 @@ class InputValidationTests(unittest.TestCase):
             })
 
 
+class PressureReferenceTests(unittest.TestCase):
+    def test_global_fluid_mean_is_shared_by_global_and_roi(self):
+        global_flow = np.zeros((2, 2, 1, 4), dtype=np.float32)
+        global_flow[..., 3] = np.array([[10.0, 20.0], [1000.0, np.nan]])[..., None]
+        is_fluid = np.array([[1.0, 1.0], [0.0, 1.0]], dtype=np.float32)[..., None]
+        roi_flow = np.zeros((1, 2, 1, 4), dtype=np.float32)
+        roi_flow[..., 3] = np.array([[30.0, 50.0]])[..., None]
+        raw_global = global_flow.copy()
+        raw_roi = roi_flow.copy()
+
+        reference = global_pressure_reference_kinematic(global_flow, is_fluid)
+        display = presentation_prediction(
+            {"pred_flow": global_flow, "roi_preds": {"roi_000": roi_flow}},
+            reference,
+        )
+
+        self.assertEqual(reference, 15.0)
+        self.assertAlmostEqual(
+            float(np.nanmean(display["pred_flow"][..., 3][is_fluid > 0.5])),
+            0.0,
+        )
+        np.testing.assert_allclose(
+            display["roi_preds"]["roi_000"][..., 3].reshape(-1),
+            [15.0, 35.0],
+        )
+        np.testing.assert_equal(global_flow, raw_global)
+        np.testing.assert_equal(roi_flow, raw_roi)
+
+    def test_saved_fields_stay_raw_and_reference_is_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case_dir = root / "case"
+            cfd_dir = root / "cfd"
+            cfd_dir.mkdir()
+            (cfd_dir / "meta.json").write_text("{}")
+            np.savez_compressed(
+                cfd_dir / "flow.npz",
+                Ux=np.zeros((1, 1, 2), dtype=np.float32),
+                Uy=np.zeros((1, 1, 2), dtype=np.float32),
+                Uz=np.zeros((1, 1, 2), dtype=np.float32),
+                p=np.zeros((1, 1, 2), dtype=np.float32),
+                is_fluid=np.ones((1, 1, 2), dtype=np.float32),
+            )
+            raw = np.zeros((1, 1, 2, 4), dtype=np.float32)
+            raw[..., 3] = [10.0, 20.0]
+            bundle = SimpleNamespace(
+                is_fluid=np.ones((1, 1, 2), dtype=np.float32),
+            )
+
+            saved = save_inputs_and_predictions(
+                root / "results",
+                "case_a",
+                case_dir=case_dir,
+                cfd_dir=cfd_dir,
+                predict_out={
+                    "bundle": bundle,
+                    "pred_flow": raw,
+                    "roi_bundles": {},
+                    "roi_preds": {},
+                },
+                pressure_reference_kinematic=15.0,
+            )
+
+            with np.load(saved / "cfd" / "flow.npz") as flow:
+                np.testing.assert_allclose(flow["p"].reshape(-1), [10.0, 20.0])
+            meta = json.loads((saved / "presentation.json").read_text())
+            self.assertEqual(meta["pressure_reference_kinematic"], 15.0)
+            self.assertEqual(
+                meta["pressure_reference_convention"],
+                "global_fluid_arithmetic_mean_zero",
+            )
+
+
 class HttpBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -199,6 +282,7 @@ class HttpBoundaryTests(unittest.TestCase):
         self.assertIn("pinnfluid - Wind and pressure prediction", text)
         self.assertIn("jimmy.gasser@epfl.ch", text)
         self.assertIn("https://github.com/jimmygasser/pinnfluid", text)
+        self.assertIn("global fluid-domain mean is set to zero", text)
         self.assertNotIn("Past runs", text)
 
     def test_run_index_is_hidden_by_default(self):

@@ -6,7 +6,7 @@ back by 270 - wind_from degrees). The full domain is the base layer; wherever a
 region of interest was refined, its fine (0.5 m) field is overlaid at its true
 position, so zooming into the structures reveals detail the coarse background
 cannot show. A dropdown selects the height above ground (terrain-following) for
-the wind-speed view, plus surface pressure and terrain altitude. Faint terrain
+the wind-speed view, plus relative pressure and terrain altitude. Faint terrain
 contours persist across every view. Hover reads the exact value.
 
 Reuses the exact slicing the static PNG plots use, so the map and the PDF agree.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -100,7 +101,8 @@ def _footprint_path(points, angle, cx, cy) -> str:
 
 
 def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
-                   pred_flow: "np.ndarray | None" = None) -> Path:
+                   pred_flow: "np.ndarray | None" = None,
+                   roi_pred_flows: Optional[dict] = None) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -127,7 +129,10 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
     if roi_root.exists():
         for rdir in sorted(p for p in roi_root.iterdir() if p.is_dir()):
             if (rdir / "meta.json").exists() and (rdir / "flow.npz").exists():
-                rois.append(_common_axes(rdir, _load_pred_flow(rdir)))
+                roi_flow = (roi_pred_flows or {}).get(rdir.name)
+                if roi_flow is None:
+                    roi_flow = _load_pred_flow(rdir)
+                rois.append(_common_axes(rdir, roi_flow))
 
     wvmin, wvmax = _broaden(*_map_quantiles(
         _map_layers_filled(gctx["pred"], 10.0)["speed_mag"]), WIND_MIN_SPAN_MS)
@@ -161,22 +166,23 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
         views.append((f"Wind speed - {h:.0f} m above ground", idxs,
                       f"{domain_name} - wind speed at {h:.0f} m above ground"))
 
-    # Surface pressure.
+    # Relative surface pressure.
     p_idxs = []
     g_p = RHO_AIR * _surface_pressure_map(gctx["pred"])
     pvv = float(np.nanmax(np.abs(g_p))) if np.isfinite(g_p).any() else 1.0
     xm, ym, z = _disp(gx, gy, g_p, angle, cx, cy)
     p_idxs.append(_add(xm, ym, z, scale="RdBu", vmin=-pvv, vmax=pvv, reverse=True,
-                       showscale=True, name="pressure", unit="p [Pa]"))
+                       showscale=True, name="relative pressure", unit="p_rel [Pa]"))
     for rctx in rois:
         rp = RHO_AIR * _surface_pressure_map(rctx["pred"])
         if not np.isfinite(rp).any():
             continue
         rxm, rym, rz = _disp(rctx["x"], rctx["y"], rp, angle, cx, cy)
         p_idxs.append(_add(rxm, rym, rz, scale="RdBu", vmin=-pvv, vmax=pvv, reverse=True,
-                           showscale=False, name="pressure ROI", unit="p [Pa]"))
-    views.append(("Surface pressure", p_idxs,
-                  f"{domain_name} - surface pressure (gauge, p_ref = outlet)"))
+                           showscale=False, name="relative pressure ROI", unit="p_rel [Pa]"))
+    views.append(("Relative surface pressure", p_idxs,
+                  f"{domain_name} - relative surface pressure "
+                  "(global fluid-domain mean = 0)"))
 
     # Terrain altitude (true m a.s.l. when the offset is known).
     # _terrain_xy transposes the raw [y, x] elevation into the [x, y] frame the

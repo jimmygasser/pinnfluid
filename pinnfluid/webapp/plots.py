@@ -271,13 +271,13 @@ def _max_pressure_map(bundle: dict) -> np.ndarray:
 
 
 def _cp_extrema(bundle: dict) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Per-column max/min Cp over all fluid z-levels (full ROI coverage)."""
+    """Per-column max/min relative Cp over all fluid z-levels."""
+    from units import cp_from_kinematic  # type: ignore  noqa: E402
     meta = bundle["meta"]
     uref = float(meta.get("ABL", {}).get("Uref", 1.0)) or 1.0
-    q = 0.5 * uref * uref
     p = np.asarray(bundle["flow"]["p"], dtype=np.float32)
     is_fluid = np.asarray(bundle["flow"]["is_fluid"], dtype=bool)
-    cp = np.where(is_fluid, p / max(q, 1e-6), np.nan)
+    cp = np.where(is_fluid, cp_from_kinematic(p, uref), np.nan)
     has_any = np.any(np.isfinite(cp), axis=2)
     cp_max = np.full(cp.shape[:2], np.nan, dtype=np.float32)
     cp_min = np.full(cp.shape[:2], np.nan, dtype=np.float32)
@@ -403,12 +403,12 @@ def plot_surface_pressure(case_dir: Path, pred_flow: np.ndarray, *, out_path: Op
     _overlay_structure_boxes(ax, ctx["boxes"], edgecolor="k", linewidth=0.9, fill_alpha=0.25, facecolor="0.35", transform=map_trans)
     _overlay_roi_boxes(ax, ctx["roi_bounds"], transform=map_trans)
     _overlay_section_line(ax, ctx["y_section"], x_span=(float(np.nanmin(x)), float(np.nanmax(x))), transform=map_trans)
-    ax.set_title("Predicted surface pressure (gauge, p_ref = outlet)")
+    ax.set_title("Predicted relative surface pressure\n(global fluid-domain mean = 0)")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     _apply_map_limits(ax, map_limits)
-    fig.colorbar(im, ax=ax, label="p [Pa]")
-    fig.suptitle(f"{Path(case_dir).name} — surface pressure", fontsize=11)
+    fig.colorbar(im, ax=ax, label="relative p [Pa]")
+    fig.suptitle(f"{Path(case_dir).name} — relative surface pressure", fontsize=11)
     return _save_fig(fig, out_path)
 
 
@@ -498,12 +498,12 @@ def plot_global_max_pressure(case_dir: Path, pred_flow: np.ndarray, *, out_path:
     im = _pmesh(ax, x_map, y_map, p_max_ds, cmap="coolwarm", norm=p_norm, vmin=p_vmin, vmax=p_vmax, transform=map_trans)
     _overlay_structure_boxes(ax, ctx["boxes"], edgecolor="k", linewidth=0.9, fill_alpha=0.25, facecolor="0.35", transform=map_trans)
     _overlay_roi_boxes(ax, ctx["roi_bounds"], transform=map_trans)
-    ax.set_title("Predicted max pressure over z (gauge, p_ref = outlet)")
+    ax.set_title("Predicted maximum relative pressure over z\n(global fluid-domain mean = 0)")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     _apply_map_limits(ax, map_limits)
-    fig.colorbar(im, ax=ax, label="max p [Pa]")
-    fig.suptitle(f"{Path(case_dir).name} — global max pressure", fontsize=11)
+    fig.colorbar(im, ax=ax, label="max relative p [Pa]")
+    fig.suptitle(f"{Path(case_dir).name} — global maximum relative pressure", fontsize=11)
     return _save_fig(fig, out_path)
 
 
@@ -573,12 +573,15 @@ def plot_roi_surface_pressure(
         map_trans, map_limits = _map_transform(ax, meta, x, y)
         im = _pmesh(ax, x_map, y_map, p_ds, cmap="coolwarm", norm=p_norm, vmin=p_vmin, vmax=p_vmax, transform=map_trans)
         _overlay_structure_boxes(ax, boxes, edgecolor="k", linewidth=0.9, fill_alpha=0.25, facecolor="0.35", transform=map_trans, number_labels=True, number_fontsize=8.0)
-        ax.set_title(f"{roi_dir.name}: predicted near-structure pressure (gauge, p_ref = outlet)")
+        ax.set_title(
+            f"{roi_dir.name}: predicted near-structure relative pressure\n"
+            "(global fluid-domain mean = 0)"
+        )
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
         _apply_map_limits(ax, map_limits)
-        fig.colorbar(im, ax=ax, label="p [Pa]")
-    fig.suptitle(f"{Path(case_dir).name} — ROI near-structure pressure", fontsize=12)
+        fig.colorbar(im, ax=ax, label="relative p [Pa]")
+    fig.suptitle(f"{Path(case_dir).name} — ROI near-structure relative pressure", fontsize=12)
     return _save_fig(fig, out_path)
 
 
@@ -603,8 +606,8 @@ def plot_roi_max_cp(
         min_norm, min_vmin, min_vmax = _pressure_norm(cp_min_ds)
 
         for col, (field, title, norm, vmin, vmax) in enumerate([
-            (cp_max_ds, f"{roi_dir.name}: pred max Cp (over z)", max_norm, max_vmin, max_vmax),
-            (cp_min_ds, f"{roi_dir.name}: pred min Cp (suction)", min_norm, min_vmin, min_vmax),
+            (cp_max_ds, f"{roi_dir.name}: max relative Cp (over z)", max_norm, max_vmin, max_vmax),
+            (cp_min_ds, f"{roi_dir.name}: min relative Cp (suction)", min_norm, min_vmin, min_vmax),
         ]):
             ax = axes[ridx, col]
             map_trans, map_limits = _map_transform(ax, meta, x, y)
@@ -615,7 +618,7 @@ def plot_roi_max_cp(
             ax.set_ylabel("y [m]")
             _apply_map_limits(ax, map_limits)
             fig.colorbar(im, ax=ax, label=f"Cp (Uref={uref:.2f})")
-    fig.suptitle(f"{Path(case_dir).name} — ROI max/min Cp", fontsize=12)
+    fig.suptitle(f"{Path(case_dir).name} — ROI relative max/min Cp", fontsize=12)
     return _save_fig(fig, out_path)
 
 
@@ -812,23 +815,23 @@ def plot_roi_disagreement(
 # Report aggregator
 # ---------------------------------------------------------------------------
 # Fixed display order (web "Show plots" AND the PDF report both follow this):
-#   terrain context -> wind speed -> surface pressure -> global max pressure
+#   terrain context -> wind speed -> relative pressure -> global max pressure
 #   -> snow indicator (global, optional) -> vertical profiles.
 # The profiles plot is intentionally LAST in the global group so it sits right
 # before the ROI plots (and any sampling-point profiles that follow them).
 _GLOBAL_PLOTS: list[Tuple[str, Callable, str, str]] = [
     ("terrain_context",    plot_terrain_context,    "terrain_context.png",    "Terrain context"),
     ("wind_speed",         plot_wind_speed,         "wind_speed.png",         "Wind speed"),
-    ("surface_pressure",   plot_surface_pressure,   "surface_pressure.png",   "Surface pressure"),
-    ("global_max_pressure", plot_global_max_pressure, "global_max_pressure.png", "Global max pressure"),
+    ("surface_pressure",   plot_surface_pressure,   "surface_pressure.png",   "Relative surface pressure"),
+    ("global_max_pressure", plot_global_max_pressure, "global_max_pressure.png", "Global maximum relative pressure"),
     ("snow_indicator",     plot_snow_indicator,     "snow_indicator.png",     "Snow drift indicator (heuristic)"),
     ("profiles",           plot_profiles,           "profiles.png",           "Vertical profiles"),
 ]
 
 _ROI_PLOTS: list[Tuple[str, Callable, str, str]] = [
     ("roi_wind_speed",        plot_roi_wind_speed,       "roi_wind_speed.png",       "ROI wind speed"),
-    ("roi_surface_pressure",  plot_roi_surface_pressure, "roi_surface_pressure.png", "ROI surface pressure"),
-    ("roi_max_cp",            plot_roi_max_cp,           "roi_max_cp.png",           "ROI max/min Cp"),
+    ("roi_surface_pressure",  plot_roi_surface_pressure, "roi_surface_pressure.png", "ROI relative surface pressure"),
+    ("roi_max_cp",            plot_roi_max_cp,           "roi_max_cp.png",           "ROI relative max/min Cp"),
     ("roi_snow_indicator",    plot_roi_snow_indicator,   "roi_snow_indicator.png",   "ROI snow drift indicator (heuristic)"),
 ]
 

@@ -124,7 +124,7 @@ def _per_structure_forces(roi_bundle, pred_flow_roi: np.ndarray, abl: dict) -> l
     """Per-structure integrated drag / lift estimate.
 
     Approximates the surface pressure integral around each structure AABB by:
-      1. For each of the 6 axis-aligned faces, average the predicted gauge
+      1. For each of the 6 axis-aligned faces, average the predicted relative
          pressure over the cells in a 1 m halo *just outside* that face.
       2. Net force = sum over 6 faces of (-p_face * area * n_outward).
       3. Drag = F dot flow_direction; lift_z = F_z.
@@ -133,8 +133,9 @@ def _per_structure_forces(roi_bundle, pred_flow_roi: np.ndarray, abl: dict) -> l
     Notes:
       - Pressure values stored on `pred_flow` are kinematic (m^2/s^2). We
         multiply by `RHO_AIR` here so all reported forces are in Newtons.
-      - The outlet-referenced pressure constant cancels on a closed body, so
-        absolute reference doesn't affect the net force estimate.
+      - One global pressure-reference constant is used for the entire
+        prediction. It cancels on a closed body; incomplete surface sampling
+        makes the experimental estimate mildly reference-sensitive in practice.
       - The model's pressure accuracy on multistructure interiors is currently
         weak (see project notes). Treat Cd values for closely-packed grids as
         rough first estimates.
@@ -248,7 +249,7 @@ def _surface_integrated_forces(
 ) -> list:
     """Per-structure force/moment from pressure integration over the STL mesh.
 
-    For every mesh face: sample the predicted gauge pressure just outside the
+    For every mesh face: sample the predicted relative pressure just outside the
     surface (face centroid + outward normal x offset, retried at 2-3 offsets),
     then F = sum(-p * n * A) and M = sum(r x f) about the structure AABB base
     centre. Faces whose probes land in solid/NaN cells are skipped and reported
@@ -453,6 +454,7 @@ def compute_summary_stats(
     runtime_s: Optional[float] = None,
     structure_stl_path=None,
     sampling_points: Optional[list] = None,
+    pressure_reference_kinematic: float = 0.0,
 ) -> dict:
     """Engineering-flavoured stats: max wind, max/min pressure, locations, ABL.
 
@@ -575,12 +577,23 @@ def compute_summary_stats(
         except Exception:
             sampling_out = []
 
+    from pressure_reference import (  # type: ignore
+        PRESSURE_REFERENCE_CONVENTION,
+        PRESSURE_REFERENCE_LABEL,
+    )
+
     return {
         'model_name': str(model_name),
         'runtime_s': float(runtime_s) if runtime_s is not None else None,
         'air': {
             'rho_kg_m3': float(_units.RHO_AIR),
             'site_elevation_m_asl': float(site_elev),
+        },
+        'pressure_reference': {
+            'convention': PRESSURE_REFERENCE_CONVENTION,
+            'label': PRESSURE_REFERENCE_LABEL,
+            'subtracted_kinematic_m2_s2': float(pressure_reference_kinematic),
+            'subtracted_pa': float(_units.RHO_AIR * pressure_reference_kinematic),
         },
         'global': {
             'grid_shape': list(bundle.flow.shape[:3]),
@@ -683,12 +696,19 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
         out.append(f"  Mean wind at Zref+terrain ({mu_z.get('actual_z_m', 0):.0f}m): {mu_z.get('value_mps', float('nan')):.2f} m/s")
     out.append("")
 
-    out.append("--- Pressure ---")
+    pref = stats.get('pressure_reference') or {}
+    out.append("--- Relative pressure ---")
+    out.append("  Reference: global fluid-domain arithmetic mean = 0 Pa")
+    if pref.get('subtracted_pa') is not None:
+        out.append(
+            f"  Raw-model offset removed from displayed pressure: "
+            f"{float(pref['subtracted_pa']):+.2f} Pa"
+        )
     if g.get('max_p'):
-        out.append(f"  Max pressure:           {g['max_p']['value_pa']:+.2f} Pa")
+        out.append(f"  Max relative pressure:  {g['max_p']['value_pa']:+.2f} Pa")
         out.append(f"      at  {_fmt_loc(g['max_p'])}")
     if g.get('min_p'):
-        out.append(f"  Min pressure:           {g['min_p']['value_pa']:+.2f} Pa")
+        out.append(f"  Min relative pressure:  {g['min_p']['value_pa']:+.2f} Pa")
         out.append(f"      at  {_fmt_loc(g['min_p'])}")
     out.append("")
 
@@ -702,14 +722,14 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
             if r.get('max_umag'):
                 out.append(f"    Max wind:                  {r['max_umag']['value_mps']:.2f} m/s")
             if r.get('max_p'):
-                out.append(f"    Max pressure (load):       {r['max_p']['value_pa']:+.2f} Pa")
+                out.append(f"    Max relative pressure:     {r['max_p']['value_pa']:+.2f} Pa")
             if r.get('min_p'):
-                out.append(f"    Min pressure (suction):    {r['min_p']['value_pa']:+.2f} Pa")
+                out.append(f"    Min relative pressure:     {r['min_p']['value_pa']:+.2f} Pa")
             if r.get('max_p_near_wall'):
-                out.append(f"    Max pressure on structure: {r['max_p_near_wall']['value_pa']:+.2f} Pa  at z_rel={r['max_p_near_wall']['z_rel_m']:.1f}m")
+                out.append(f"    Max relative pressure on structure: {r['max_p_near_wall']['value_pa']:+.2f} Pa  at z_rel={r['max_p_near_wall']['z_rel_m']:.1f}m")
             if r.get('p_near_wall_range_pa'):
                 rng = r['p_near_wall_range_pa']
-                out.append(f"    Pressure on structure (Pa): min={rng['min']:+.2f}, max={rng['max']:+.2f}")
+                out.append(f"    Relative pressure on structure (Pa): min={rng['min']:+.2f}, max={rng['max']:+.2f}")
             forces = r.get('per_structure_forces') or []
             if forces:
                 def _ff(v, w, prec):
@@ -735,7 +755,7 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
                         f"      {int(sidx):>3d} {_ff(fx, 10, 1)} {_ff(fy, 10, 1)} {_ff(fz, 10, 1)} {_ff(fd, 12, 1)} {_ff(movt, 11, 1)} {_ff(cd, 7, 2)}"
                     )
                 if method == 'surface_integration':
-                    out.append("      F = -sum(p n dA) over mesh faces (gauge p sampled just off-surface);")
+                    out.append("      F = -sum(p n dA) over mesh faces (relative p sampled just off-surface);")
                     out.append("      M_ovt about the structure base centre; shear stress not included.")
                     cov = [f.get('area_coverage') for f in forces if f.get('area_coverage') is not None]
                     if cov:
@@ -856,7 +876,8 @@ def write_rose_pdf_report(out_path, *, domain_name: str, summary: dict,
             f"Generated: {summary.get('generated_at', '')}",
             f"Directions: {summary.get('n_directions', len(sections))}",
             "",
-            f"{'dir':>6s} {'maxU ng':>9s} {'meanU zref':>11s} {'max|Fdrag|':>11s} {'max suction':>12s}",
+            f"{'dir':>6s} {'maxU ng':>9s} {'meanU zref':>11s} "
+            f"{'max|Fdrag|':>11s} {'rel suction':>12s}",
         ]
         for rec in (summary.get('sectors') or []):
             def _f(v, w, p):
@@ -867,8 +888,12 @@ def write_rose_pdf_report(out_path, *, domain_name: str, summary: dict,
                 f"{_f(rec.get('mean_u_zref'), 11, 2)} {_f(rec.get('max_drag_N'), 11, 1)} "
                 f"{_f(rec.get('max_suction_pa'), 12, 1)}{gov}"
             )
-        lines += ["", "Full artifacts (3D views, exports, per-direction PDF) are kept",
-                  "for every direction under results/<domain>_rXXX/."]
+        lines += [
+            "",
+            "Pressure: each sector uses its own global fluid-domain mean = 0 reference.",
+            "Full artifacts (3D views, exports, per-direction PDF) are kept",
+            "for every direction under results/<domain>_rXXX/.",
+        ]
         ax.text(0.05, 0.90, '\n'.join(lines), transform=ax.transAxes,
                 fontsize=9, family='monospace', va='top')
         pdf.savefig(fig)
@@ -914,7 +939,8 @@ def write_pdf_report(out_path, *, domain_name: str, stats: dict, plot_paths: lis
             pdf, _stats_lines(stats, domain_name),
             title="Wind Flow Prediction Report",
             footer="Generated by predict_web (pinn_terr_struc surrogate). "
-                   "All locations are in the local domain frame.",
+                   "All locations are in the local domain frame. Displayed "
+                   "pressure uses the global fluid-domain mean = 0 reference.",
         )
 
         # Following pages: each plot as a page (A4 portrait, fit-to-page)
