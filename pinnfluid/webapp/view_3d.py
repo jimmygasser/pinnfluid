@@ -131,16 +131,13 @@ def _viz_fluid_mask(bundle) -> np.ndarray:
 def _ground_pressure_field(bundle, pred_flow: np.ndarray) -> np.ndarray:
     """Pressure at the lowest predicted cell above each (i, j). (ny, nx).
 
-    Gates by `np.isfinite(pred_flow)` instead of `bundle.is_fluid` so the
-    field follows the inference coverage (widened by predict_web) rather
-    than the truth bundle's narrow empty-export mask. Falls back to
-    treating "all-zero" cells as un-predicted for stale saves that wrote
-    zeros instead of NaNs.
+    Use the rebuilt visualisation mask rather than merely testing whether the
+    prediction is finite/nonzero. Display pressure is mean-corrected after
+    inference, so below-terrain zero-fill cells otherwise become the same
+    nonzero constant in every column and produce a one-colour terrain.
     """
     nx, ny, nz = bundle.flow.shape[:3]
-    finite = np.isfinite(pred_flow).all(axis=-1)
-    non_zero = (np.asarray(pred_flow, dtype=np.float32) != 0.0).any(axis=-1)
-    valid = finite & non_zero                              # (nx, ny, nz)
+    valid = _viz_fluid_mask(bundle) & np.isfinite(pred_flow).all(axis=-1)
     p_field = pred_flow[..., 3]
     first_k = np.argmax(valid, axis=-1)                    # 0 if all False
     has_any = valid.any(axis=-1)
@@ -153,9 +150,7 @@ def _ground_pressure_field(bundle, pred_flow: np.ndarray) -> np.ndarray:
 def _ground_speed_field(bundle, pred_flow: np.ndarray) -> np.ndarray:
     """|U| at the lowest predicted cell above each (i, j). Returns (ny, nx)."""
     nx, ny, nz = bundle.flow.shape[:3]
-    finite = np.isfinite(pred_flow).all(axis=-1)
-    non_zero = (np.asarray(pred_flow, dtype=np.float32) != 0.0).any(axis=-1)
-    valid = finite & non_zero
+    valid = _viz_fluid_mask(bundle) & np.isfinite(pred_flow).all(axis=-1)
     umag = np.linalg.norm(np.asarray(pred_flow[..., :3], dtype=np.float32), axis=-1)
     first_k = np.argmax(valid, axis=-1)
     has_any = valid.any(axis=-1)
@@ -245,11 +240,7 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
     from units import RHO_AIR  # type: ignore  noqa: E402
     p_ground = RHO_AIR * _ground_pressure_field(bundle, pred_flow)  # Pa, (ny, nx)
     p_ground_ds = p_ground[::sy, ::sx]
-    finite_p = np.isfinite(p_ground_ds)
-    if bool(np.any(finite_p)):
-        p_lim = float(np.nanmax(np.abs(p_ground_ds[finite_p])))
-    else:
-        p_lim = 1.0
+    p_lim = _shared_pressure_limits(p_ground_ds)
 
     common_lighting = dict(ambient=0.55, diffuse=0.85, specular=0.12,
                            roughness=0.7, fresnel=0.1)
@@ -1407,7 +1398,9 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         umag_max = float(max(Umag_full.max(), 1e-3))
     else:
         umag_max = 1.0
-    cone_sizeref = umag_max * 0.5
+    # Compact ROI views become unreadable when the default half-maximum cone
+    # scale is combined with the 1k/3k glyph densities.
+    cone_sizeref = umag_max * 0.25
 
     traces: list = []
 

@@ -824,6 +824,14 @@ function renderStats(stats, payload) {
         html += '<td class="num">'+v+'</td>';
       });
       html += '</tr></table>';
+      var hasUnavailable = sps.some(function(sp) {
+        return sp.in_domain && (sp.heights || []).some(function(h) { return h.u_mps == null; });
+      });
+      if (hasUnavailable) {
+        html += '<div style="font-size:11px; color:#666; margin-top:4px;">'
+              + '— means the requested height is outside the available model levels at that point; '
+              + 'values are not extrapolated.</div>';
+      }
     }
     // Per-point locations + any out-of-domain notes.
     var locLines = sps.map(function(sp){
@@ -2135,7 +2143,7 @@ Local frame:
 """
 
 
-def _render_vtk_zip(name: str) -> bytes:
+def _render_vtk_zip(name: str) -> Path:
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
     saved = load_saved_inputs(RESULTS_DIR, name)
@@ -2153,22 +2161,28 @@ def _render_vtk_zip(name: str) -> bytes:
             f"{s['label']} ({s['n_points']/1e6:.1f}M pts)" for s in info["skipped"]
         )
         raise RuntimeError(f"No VTK files produced (all skipped: {skipped_summary or 'none'})")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in info["files"]:
-            zf.write(p, arcname=Path(p).name)
-        # Bundle the terrain + structure STLs so the user can overlay them
-        # in ParaView and immediately see where the cube interior corresponds
-        # to terrain vs fluid.
-        case_tri = RESULTS_DIR / name / "inputs" / "case" / "triSurface"
-        for stl_name in ("ground.stl", "structure.stl"):
-            stl_path = case_tri / stl_name
-            if stl_path.exists():
-                zf.write(stl_path, arcname=stl_name)
-        # README explaining the layout + how to filter to fluid only.
-        zf.writestr("README.txt", _VTK_README)
-    buf.seek(0)
-    return buf.read()
+    export_dir = RESULTS_DIR / name / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = export_dir / f"{name}_vtk.zip"
+    tmp_path = export_dir / f".{name}_vtk.{uuid.uuid4().hex}.tmp"
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in info["files"]:
+                zf.write(p, arcname=Path(p).name)
+            # Bundle the terrain + structure STLs so the user can overlay them
+            # in ParaView and immediately see where the cube interior corresponds
+            # to terrain vs fluid.
+            case_tri = RESULTS_DIR / name / "inputs" / "case" / "triSurface"
+            for stl_name in ("ground.stl", "structure.stl"):
+                stl_path = case_tri / stl_name
+                if stl_path.exists():
+                    zf.write(stl_path, arcname=stl_name)
+            # README explaining the layout + how to filter to fluid only.
+            zf.writestr("README.txt", _VTK_README)
+        tmp_path.replace(zip_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return zip_path
 
 
 def _render_npz_zip(name: str) -> bytes:
@@ -2566,17 +2580,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not domain:
                     raise ValueError("missing ?domain=")
                 domain = _safe_name(domain)
-                data = _render_vtk_zip(domain)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/zip")
-                self.send_header(
-                    "Content-Disposition",
-                    f'attachment; filename="{domain}_vtk.zip"',
+                zip_path = _render_vtk_zip(domain)
+                self._send_path(
+                    zip_path,
+                    content_type="application/zip",
+                    content_disposition=f'attachment; filename="{domain}_vtk.zip"',
+                    allow_gzip=False,
                 )
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
             except Exception as ex:
+                traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=404)
             return
         if path == "/download_npz":

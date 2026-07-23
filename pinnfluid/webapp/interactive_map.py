@@ -259,17 +259,19 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
         keep = set(idxs) | set(persistent)
         return [i in keep for i in range(n)]
 
-    buttons = [dict(label=lbl, method="update", args=[{"visible": _mask(idxs)}, {"title": title}])
-               for (lbl, idxs, title) in views]
+    buttons = [
+        dict(label=lbl, method="update", args=[{"visible": _mask(idxs)}])
+        for (lbl, idxs, _title) in views
+    ]
 
     fig.update_layout(
-        title=views[0][2],
+        title=None,
         shapes=shapes,
         xaxis=dict(title="x [m]", constrain="domain", visible=False),
         yaxis=dict(scaleanchor="x", scaleratio=1, visible=False),
         # Contours are legend-toggled. Keep that legend outside the map on the
         # left so it never covers the active field's colorbar on the right.
-        margin=dict(l=150, r=20, t=80, b=20),
+        margin=dict(l=150, r=20, t=55, b=20),
         legend=dict(
             title=dict(text="Contours"),
             x=-0.02, y=0.5, xanchor="right", yanchor="middle",

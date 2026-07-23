@@ -25,10 +25,12 @@ for path in (
     sys.path.insert(0, str(path))
 
 from webapp import app  # noqa: E402
+from webapp import view_3d  # noqa: E402
 from webapp.pressure_reference import (  # noqa: E402
     global_pressure_reference_kinematic,
     presentation_prediction,
 )
+from webapp.report import _sampling_point_profiles  # noqa: E402
 from webapp.results_io import save_inputs_and_predictions  # noqa: E402
 
 
@@ -273,6 +275,64 @@ class PressureReferenceTests(unittest.TestCase):
             )
 
 
+class PresentationFieldTests(unittest.TestCase):
+    @staticmethod
+    def _bundle():
+        return SimpleNamespace(
+            flow=np.zeros((2, 1, 3, 4), dtype=np.float32),
+            is_fluid=np.array(
+                [[[0.0, 1.0, 1.0]], [[0.0, 1.0, 1.0]]],
+                dtype=np.float32,
+            ),
+            x_coords=np.array([0.0, 1.0], dtype=np.float32),
+            y_coords=np.array([0.0], dtype=np.float32),
+            z_levels=np.array([0.0, 1.0, 2.0], dtype=np.float32),
+            terrain_raw={"elevation": np.array([[0.5, 0.5]], dtype=np.float32)},
+            meta={
+                "bounds": [0.0, 1.0, 0.0, 0.0, 0.0, 2.0],
+                "z_levels": [0.0, 1.0, 2.0],
+                "structure_bounds": [],
+            },
+        )
+
+    def test_3d_ground_fields_ignore_below_terrain_pressure_fill(self):
+        bundle = self._bundle()
+        pred = np.zeros((2, 1, 3, 4), dtype=np.float32)
+        # Mean-pressure presentation turns original solid zero-fill into a
+        # finite nonzero constant. It must not be selected as ground pressure.
+        pred[:, :, 0, 3] = -50.0
+        pred[0, 0, 1, :] = [3.0, 0.0, 0.0, 1.0]
+        pred[1, 0, 1, :] = [4.0, 0.0, 0.0, 2.0]
+
+        np.testing.assert_allclose(
+            view_3d._ground_pressure_field(bundle, pred),
+            [[1.0, 2.0]],
+        )
+        np.testing.assert_allclose(
+            view_3d._ground_speed_field(bundle, pred),
+            [[3.0, 4.0]],
+        )
+
+    def test_sampling_profiles_mark_unavailable_heights_without_extrapolation(self):
+        bundle = self._bundle()
+        pred = np.zeros((2, 1, 3, 4), dtype=np.float32)
+        pred[0, 0, 1, 0] = 2.0
+        pred[0, 0, 2, 0] = 4.0
+        records = _sampling_point_profiles(
+            bundle,
+            pred,
+            [{"x": 0.0, "y": 0.0, "label": "SP1"}],
+            heights=(0.2, 0.5, 1.0, 2.0),
+        )
+
+        self.assertEqual(records[0]["available_zrel_min_m"], 0.5)
+        self.assertEqual(records[0]["available_zrel_max_m"], 1.5)
+        self.assertIsNone(records[0]["heights"][0]["u_mps"])
+        self.assertEqual(records[0]["heights"][1]["u_mps"], 2.0)
+        self.assertEqual(records[0]["heights"][2]["u_mps"], 3.0)
+        self.assertIsNone(records[0]["heights"][3]["u_mps"])
+
+
 class HttpBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -334,6 +394,18 @@ class HttpBoundaryTests(unittest.TestCase):
         status, _, body = self.request("POST", "/upload_dem", b"not-json")
         self.assertEqual(status, 400)
         self.assertIn(b"must be valid JSON", body)
+
+    def test_vtk_download_is_streamed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vtk_zip = Path(tmp) / "case_vtk.zip"
+            payload = b"vtk archive"
+            vtk_zip.write_bytes(payload)
+            with patch.object(app, "_render_vtk_zip", return_value=vtk_zip):
+                status, headers, body = self.request("GET", "/download_vtk?domain=case")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Transfer-Encoding"), "chunked")
+        self.assertNotIn("Content-Length", headers)
+        self.assertEqual(body, payload)
 
 
 if __name__ == "__main__":

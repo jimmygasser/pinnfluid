@@ -430,6 +430,8 @@ def _sampling_point_profiles(
             order = np.argsort(zr)
             zr = zr[order]
             vv = vv[order]
+            rec['available_zrel_min_m'] = float(zr[0])
+            rec['available_zrel_max_m'] = float(zr[-1])
             for h in heights:
                 if h < float(zr[0]) - 1e-6 or h > float(zr[-1]) + 1e-6:
                     u = None
@@ -774,6 +776,7 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
     if sps:
         out.append("--- Sampling points ---")
         out.append("  Wind speed |U| (m/s) vs height above ground at each placed point.")
+        out.append("  — = requested height outside the available model levels; values are not extrapolated.")
         for sp in sps:
             loc_bits = []
             if sp.get('x_m') is not None:
@@ -792,6 +795,12 @@ def _stats_lines(stats: dict, domain_name: str) -> list[str]:
                     u = h.get('u_mps')
                     us = '—' if u is None else f"{u:.2f}"
                     out.append(f"      {h.get('z_rel_m', 0):>10.0f}  {us:>10s}")
+            if sp.get('available_zrel_min_m') is not None:
+                out.append(
+                    f"      available model levels: "
+                    f"{sp['available_zrel_min_m']:.1f}–"
+                    f"{sp.get('available_zrel_max_m', sp['available_zrel_min_m']):.1f} m above ground"
+                )
             if sp.get('col_max_u_mps') is not None:
                 out.append(
                     f"      column max |U| = {sp['col_max_u_mps']:.2f} m/s "
