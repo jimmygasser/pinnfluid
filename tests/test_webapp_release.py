@@ -425,5 +425,51 @@ class HttpBoundaryTests(unittest.TestCase):
         self.assertEqual(body, payload)
 
 
+class SamplingFrameTests(unittest.TestCase):
+    """Sampling points must stay geographically fixed across wind directions.
+
+    The local frame is defined by structure placement
+    (place_structure.crs_to_local): local = R(+theta)(p - pivot) + centre.
+    theta = 0 for the default wind from 270, so a sign error in the sampling
+    projection is invisible in single predictions and only shows up between
+    wind-rose sectors."""
+
+    PIVOT = (2600000.0, 1200000.0)
+
+    def _meta(self, theta_deg):
+        return {
+            "pivot_xy": list(self.PIVOT),
+            "theta_math_deg": theta_deg,
+            "final_W": 1000.0,
+            "final_H": 1000.0,
+            "domain_size": [1000.0, 1000.0],
+        }
+
+    def test_point_follows_structure_frame_convention(self):
+        body = {"sampling_points": [
+            {"crs_x": self.PIVOT[0] + 100.0, "crs_y": self.PIVOT[1]},
+        ]}
+        # Wind from 270 (theta = 0): 100 m east of the pivot stays east.
+        p0 = app._sampling_points_to_local(body, self._meta(0.0))[0]
+        self.assertAlmostEqual(p0["x"], 600.0, places=6)
+        self.assertAlmostEqual(p0["y"], 500.0, places=6)
+        # Wind from 0 / north (theta = +90): local +x points along the flow
+        # (south), so east of the pivot must land at local +y.
+        p90 = app._sampling_points_to_local(body, self._meta(90.0))[0]
+        self.assertAlmostEqual(p90["x"], 500.0, places=6)
+        self.assertAlmostEqual(p90["y"], 600.0, places=6)
+
+    def test_local_to_lv95_round_trip_all_frames(self):
+        import report
+        e, n = self.PIVOT[0] + 73.0, self.PIVOT[1] - 41.0
+        body = {"sampling_points": [{"crs_x": e, "crs_y": n}]}
+        for theta in (0.0, 37.5, 90.0, 180.0, 271.0):
+            rec = app._sampling_points_to_local(body, self._meta(theta))[0]
+            back = report._local_to_lv95(rec["x"], rec["y"], self._meta(theta))
+            self.assertIsNotNone(back)
+            self.assertAlmostEqual(back[0], e, places=6, msg=f"theta={theta}")
+            self.assertAlmostEqual(back[1], n, places=6, msg=f"theta={theta}")
+
+
 if __name__ == "__main__":
     unittest.main()

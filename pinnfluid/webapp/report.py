@@ -89,8 +89,11 @@ def _local_to_lv95(x_local: float, y_local: float, transform_meta: Optional[dict
         cx = x_local - 0.5 * W
         cy = y_local - 0.5 * H
         theta = math.radians(theta_deg)
-        de = cx * math.cos(theta) - cy * math.sin(theta)
-        dn = cx * math.sin(theta) + cy * math.cos(theta)
+        # True inverse of the forward frame map local = R(+theta)(p - pivot)
+        # + centre used by structure placement and sampling projection:
+        # p = pivot + R(-theta)(local - centre).
+        de = cx * math.cos(theta) + cy * math.sin(theta)
+        dn = -cx * math.sin(theta) + cy * math.cos(theta)
         return float(pivot[0]) + de, float(pivot[1]) + dn
     except Exception:
         return None

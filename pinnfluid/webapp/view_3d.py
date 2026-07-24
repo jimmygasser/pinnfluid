@@ -27,7 +27,12 @@ import numpy as np
 _TERRAIN_MAX_CELLS_SIDE = 400
 
 GLYPH_DENSITY_LEVELS = [1000, 3000, 9000, 25000]
-DEFAULT_GLYPH_IDX = 1  # 3k
+DEFAULT_GLYPH_IDX = 1  # 3k (level used when glyphs are switched on; start = 0/off)
+
+# Cp min/max diamond markers on structures: disabled for now — the ROI
+# pressure field is the weakest output and the snapped AABB anchors were not
+# informative. Re-enable when the pressure prediction improves.
+SHOW_PRESSURE_EXTREMA = False
 
 STREAMLINE_HEIGHTS_M = [2, 10, 20, 30, 50, 100, 200]
 STREAMLINE_COUNTS = [10, 20, 30, 40, 50]
@@ -200,7 +205,7 @@ def _snow_surface_trace(x, y, z_ds, speed_ds, *, lighting, lightposition, visibl
         cmin=-0.5, cmax=2.5,
         opacity=1.0, showscale=True,
         colorbar=dict(
-            title='Snow drift', x=0.0, xanchor='left', len=0.4, y=0.5,
+            title='Snow drift', x=0.0, xanchor='left', len=0.4, y=0.42,
             tickvals=[0, 1, 2],
             ticktext=['deposition', 'neutral', 'erosion'],
         ),
@@ -253,11 +258,13 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         cmin=float(np.nanmin(elev_real)),
         cmax=float(np.nanmax(elev_real)),
         opacity=1.0, showscale=True,
-        colorbar=dict(title='Elevation (m)', x=0.0, xanchor='left', len=0.4, y=0.5),
+        colorbar=dict(title='Elevation (m)', x=0.0, xanchor='left', len=0.4, y=0.42),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
         name='Terrain (elevation)',
-        legendgroup='terrain', showlegend=True,
+        # Terrain is always visible: no legend row, so it cannot be hidden
+        # (colour-mode buttons still switch elevation/pressure/drift).
+        legendgroup='terrain', showlegend=False,
         text=_surface_hover_text(
             elev_real_ds,
             formatter=lambda z: f'Terrain elevation: {z:.1f} m',
@@ -271,7 +278,7 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         colorscale='RdBu_r',
         cmin=-p_lim, cmax=p_lim,
         opacity=1.0, showscale=True,
-        colorbar=dict(title='Relative p (Pa)', x=0.0, xanchor='left', len=0.4, y=0.5),
+        colorbar=dict(title='Relative p (Pa)', x=0.0, xanchor='left', len=0.4, y=0.42),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
         name='Terrain (relative pressure)',
@@ -367,7 +374,7 @@ def _structure_traces(structure_stl_path: Optional[Path], *,
             i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
             color='#6a1b9a', opacity=1.0, flatshading=True,
             lighting=dict(ambient=0.45, diffuse=0.85, specular=0.25, roughness=0.5),
-            name='Structures', legendgroup='structures', showlegend=True,
+            name='Structures', legendgroup='structures', showlegend=False,
             hovertemplate='Structure surface<extra></extra>',
         )]
     except Exception:
@@ -780,7 +787,7 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
         t = _make_cone_trace(
             bundle, pred_flow, n,
             name=f'Wind ({n:,} glyphs)',
-            visible=(idx == DEFAULT_GLYPH_IDX),
+            visible=False,  # glyphs start hidden: their slider starts at 0
             umag_max=umag_max, sizeref=cone_sizeref,
         )
         trace_groups['glyphs'].append(len(traces))
@@ -877,17 +884,16 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
     # --- Persistent |U| colorbar (always-visible dummy) ---
     traces.append(_colorbar_keeper(umag_max))
 
-    # --- Legend handles (one clickable item per group) ---
-    traces.append(_legend_handle('glyphs', 'Wind glyphs', '#fde725'))
-    traces.append(_legend_handle('streams', 'Streamlines', '#5ec962'))
-
     fig = go.Figure(traces)
 
     # ----- Sliders (glyph density, streamline height, streamline count) -----
     glyph_idx = trace_groups['glyphs']
     stream_idx = trace_groups['streams']
 
-    glyph_steps = []
+    # First step = 0: hides every glyph trace. Real levels follow.
+    glyph_steps = [dict(method='restyle',
+                        args=[{'visible': [False] * len(glyph_idx)}, glyph_idx],
+                        label='0')]
     for i, n in enumerate(GLYPH_DENSITY_LEVELS):
         visible = [False] * len(glyph_idx); visible[i] = True if i < len(glyph_idx) else False
         glyph_steps.append(dict(
@@ -900,11 +906,12 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
     # via a small JS hook (see _streamline_js_hook) so the two sliders can
     # combine their states.
     height_steps = [dict(method='skip', label=f'{h} m') for h in STREAMLINE_HEIGHTS_M]
-    count_steps = [dict(method='skip', label=f'{c}') for c in STREAMLINE_COUNTS]
+    count_steps = ([dict(method='skip', label='0')]
+                   + [dict(method='skip', label=f'{c}') for c in STREAMLINE_COUNTS])
 
     sliders = [
         dict(
-            active=DEFAULT_GLYPH_IDX,
+            active=0,  # glyphs off by default (step 0)
             x=0.05, y=0.04, len=0.27, xanchor='left', yanchor='top',
             currentvalue=dict(prefix='Glyph density: ', font=dict(size=12)),
             steps=glyph_steps, pad=dict(t=10, b=4),
@@ -918,7 +925,7 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
             name='stream_height',
         ),
         dict(
-            active=DEFAULT_COUNT_IDX,
+            active=DEFAULT_COUNT_IDX + 1,  # +1: slider step 0 is the '0' state
             x=0.68, y=0.04, len=0.27, xanchor='left', yanchor='top',
             currentvalue=dict(prefix='Streamline count: ', font=dict(size=12)),
             steps=count_steps, pad=dict(t=10, b=4),
@@ -929,15 +936,15 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
     # ----- Updatemenu (terrain colour mode toggle) -----
     terrain_buttons = [
         dict(
-            label='Color: elevation', method='restyle',
+            label='elevation', method='restyle',
             args=[{'visible': [True, False, False]}, terrain_idx],
         ),
         dict(
-            label='Color: relative pressure', method='restyle',
+            label='relative pressure', method='restyle',
             args=[{'visible': [False, True, False]}, terrain_idx],
         ),
         dict(
-            label='Color: snow drift', method='restyle',
+            label='snow drift', method='restyle',
             args=[{'visible': [False, False, True]}, terrain_idx],
         ),
     ]
@@ -949,21 +956,21 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
         dict(label='↔ both', method='skip', args=[{'_direction': 'both'}]),
     ]
     updatemenus = [
+        # Vertical stack top-left, directly above the (lowered) colorbars it
+        # controls; the blue 'Ground:' annotation labels the group.
         dict(
-            type='buttons', direction='right',
+            type='buttons', direction='down',
             buttons=terrain_buttons,
-            x=0.05, y=1.02, xanchor='left', yanchor='bottom',
+            x=0.01, y=0.94, xanchor='left', yanchor='top',
             showactive=True, active=0,
             bgcolor='#f0f0f0', bordercolor='#888',
         ),
-        # Streamline direction (fwd/bwd/both) — placed at the bottom-right,
-        # just above the streamline-count slider (which is at x=0.68, y=0.04).
-        # Buttons are self-labeling with arrow glyphs so no extra annotation
-        # is needed near them.
+        # Streamline direction (fwd/bwd/both) — tight above the streamline
+        # count slider it belongs to; the 'Streamlines:' annotation sits on top.
         dict(
             type='buttons', direction='right',
             buttons=direction_buttons,
-            x=0.68, y=0.13, xanchor='left', yanchor='bottom',
+            x=0.68, y=0.055, xanchor='left', yanchor='bottom',
             showactive=True, active=0,
             bgcolor='#eaf2ff', bordercolor='#0d47a1',
             name='stream_direction',
@@ -1012,15 +1019,10 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
             aspectratio=aspect,
             camera=dict(eye=dict(x=1.5, y=-1.5, z=0.8)),
         ),
-        # Top margin holds title + buttons + streamlines-mode label.
+        # No legend: terrain and structures are always shown; glyphs and
+        # streamlines are hidden via the 0 position of their sliders.
         margin=dict(l=0, r=0, b=140, t=90),
-        showlegend=True,
-        legend=dict(
-            itemsizing='constant',
-            x=0.02, y=0.95,
-            bgcolor='rgba(255,255,255,0.85)',
-            bordercolor='#888', borderwidth=1,
-        ),
+        showlegend=False,
         sliders=sliders,
         updatemenus=updatemenus,
         annotations=[
@@ -1030,12 +1032,21 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
                 x=0.02, y=0.18, xanchor='left', yanchor='top',
                 showarrow=False, font=dict(size=14, color='#0d47a1'),
             ),
-            # Inline label sitting just above the fwd/bwd/both buttons,
-            # which were moved to the bottom-right of the figure.
+            # Label BESIDE the fwd/bwd/both buttons (same baseline): the
+            # buttons are bottom-anchored and grow upward by a fixed pixel
+            # height, so any label placed above them overlaps on short
+            # windows; a side label is height-independent.
             dict(
-                text='<i>Streamlines: integration mode</i>',
+                text='<i>Streamlines:</i>',
                 xref='paper', yref='paper',
-                x=0.68, y=0.205, xanchor='left', yanchor='bottom',
+                x=0.675, y=0.057, xanchor='right', yanchor='bottom',
+                showarrow=False, font=dict(size=11, color='#0d47a1'),
+            ),
+            # Label just above the vertical ground-colour buttons.
+            dict(
+                text='<i>Ground:</i>',
+                xref='paper', yref='paper',
+                x=0.01, y=0.945, xanchor='left', yanchor='bottom',
                 showarrow=False, font=dict(size=11, color='#0d47a1'),
             ),
         ],
@@ -1050,8 +1061,9 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
         'n_heights': n_h,
         'n_counts': n_c,
         'default_h_idx': DEFAULT_HEIGHT_IDX,
-        'default_c_idx': DEFAULT_COUNT_IDX,
+        'default_c_idx': DEFAULT_COUNT_IDX + 1,  # slider index (0 = hidden)
         'default_direction': 'forward',
+        'wake_indices': [],
     }
     return fig, meta_for_js
 
@@ -1066,6 +1078,7 @@ def _streamline_js_hook(meta: dict) -> str:
     import json as _json
     payload = _json.dumps({
         'all': meta['stream_indices'],
+        'wake': meta.get('wake_indices') or [],
         'grid_fwd': meta['stream_index_grid_fwd'],
         'grid_bwd': meta['stream_index_grid_bwd'],
         'grid_both': meta.get('stream_index_grid_both') or [None] * (int(meta['n_heights']) * int(meta['n_counts'])),
@@ -1089,7 +1102,8 @@ def _streamline_js_hook(meta: dict) -> str:
     var curDir = STATE.dir || 'forward';
 
     function targetsForCurrent() {
-      var key = curH * STATE.n_c + curC;
+      // curC is the slider index; 0 means hidden, real counts start at 1.
+      var key = curH * STATE.n_c + (curC - 1);
       var targets = [];
       if (curDir === 'both') {
         // Use the single concatenated bi-directional polyline (seeded
@@ -1116,12 +1130,18 @@ def _streamline_js_hook(meta: dict) -> str:
     function applyVisibility() {
       var n = STATE.all.length;
       var visible = new Array(n).fill(false);
-      var targets = targetsForCurrent();
-      for (var k = 0; k < targets.length; k++) {
-        var pos = STATE.all.indexOf(targets[k]);
-        if (pos >= 0) visible[pos] = true;
+      if (curC > 0) {
+        var targets = targetsForCurrent();
+        for (var k = 0; k < targets.length; k++) {
+          var pos = STATE.all.indexOf(targets[k]);
+          if (pos >= 0) visible[pos] = true;
+        }
       }
       Plotly.restyle(gd, {visible: visible}, STATE.all);
+      // Wake streamlines (structure view) follow the count slider: 0 hides them.
+      if (STATE.wake && STATE.wake.length) {
+        Plotly.restyle(gd, {visible: curC > 0}, STATE.wake);
+      }
     }
 
     gd.on('plotly_sliderchange', function(e) {
@@ -1438,6 +1458,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     )
     p_ground_ds = p_ground[::sy, ::sx]
     z_off_struct = float(((saved_inputs.get('transform_meta') or {}).get('z_offset_applied')) or 0.0)
+    wake_indices: list = []  # filled if the wake trace is built; the JS hook ties it to the count slider
     elev_real_ds = (elev_raw - z_off_struct)[::sy, ::sx]
     common_lighting = dict(ambient=0.55, diffuse=0.85, specular=0.12,
                            roughness=0.7, fresnel=0.1)
@@ -1449,11 +1470,13 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         cmin=-p_lim, cmax=p_lim,
         opacity=1.0, showscale=True,
         colorbar=dict(title='Relative p (Pa)', x=0.0, xanchor='left',
-                      len=0.5, y=0.5),
+                      len=0.4, y=0.42),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
         name='Terrain (relative pressure)',
-        legendgroup='terrain', showlegend=True,
+        # Terrain is always visible: no legend row, so it cannot be hidden
+        # (colour-mode buttons still switch elevation/pressure/drift).
+        legendgroup='terrain', showlegend=False,
         text=_surface_hover_text(
             elev_real_ds, p_ground_ds,
             formatter=lambda z, p: (
@@ -1473,7 +1496,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         cmin=float(np.nanmin(elev_raw - z_off_struct)),
         cmax=float(np.nanmax(elev_raw - z_off_struct)),
         opacity=1.0, showscale=True,
-        colorbar=dict(title='Elevation (m)', x=0.0, xanchor='left', len=0.5, y=0.5),
+        colorbar=dict(title='Elevation (m)', x=0.0, xanchor='left', len=0.4, y=0.42),
         lighting=common_lighting, lightposition=common_lightpos,
         contours=dict(z=dict(show=False)),
         name='Terrain (elevation)',
@@ -1507,7 +1530,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             flatshading=False,
             lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2, roughness=0.6),
             name='Structure (relative pressure)',
-            legendgroup='structures', showlegend=True,
+            legendgroup='structures', showlegend=False,
             text=_surface_hover_text(
                 p_vert,
                 formatter=lambda p: f'Structure relative p = {p:+.2f} Pa',
@@ -1525,9 +1548,10 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     # structure's AABB and report the highest / lowest relative pressure
     # found there. The marker is placed at that physical cell.
     #
-    # Each pair (max + min) is rendered as a *separate* legendgroup so
-    # the user can hide the markers without hiding the structure mesh.
+    # Disabled while SHOW_PRESSURE_EXTREMA is False (see module tunables).
     try:
+        if not SHOW_PRESSURE_EXTREMA:
+            raise StopIteration
         ri = focus_bundle  # ROI bundle (in structure view, this IS the ROI)
         meta_struct = ri.meta if isinstance(ri.meta, dict) else {}
         sb_list = focus_structure_bounds or []
@@ -1637,7 +1661,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         t = _make_cone_trace(
             focus_bundle, focus_pred, n,
             name=f'Wind ({n:,} glyphs)',
-            visible=(idx == DEFAULT_GLYPH_IDX),
+            visible=False,  # glyphs start hidden: their slider starts at 0
             umag_max=umag_max, sizeref=cone_sizeref,
         )
         trace_groups['glyphs'].append(len(traces))
@@ -1766,7 +1790,8 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                 name='Wake streamlines (recirculation)',
                 visible=True, umag_max=umag_max)
             if wt is not None:
-                wt.update(legendgroup='wake', showlegend=True)
+                wt.update(showlegend=False)
+                wake_indices.append(len(traces))
                 traces.append(wt)
     except Exception:
         pass
@@ -1774,17 +1799,16 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     # --- Persistent |U| Viridis colorbar (dummy) ---
     traces.append(_colorbar_keeper(umag_max))
 
-    # --- Legend handles for glyph / stream groups ---
-    traces.append(_legend_handle('glyphs', 'Wind glyphs', '#fde725'))
-    traces.append(_legend_handle('streams', 'Streamlines', '#5ec962'))
-
     fig = go.Figure(traces)
 
     # ----- Sliders -----
     glyph_idx = trace_groups['glyphs']
     stream_idx = trace_groups['streams']
 
-    glyph_steps = []
+    # First step = 0: hides every glyph trace. Real levels follow.
+    glyph_steps = [dict(method='restyle',
+                        args=[{'visible': [False] * len(glyph_idx)}, glyph_idx],
+                        label='0')]
     for i, n in enumerate(GLYPH_DENSITY_LEVELS):
         visible = [False] * len(glyph_idx)
         if i < len(glyph_idx):
@@ -1795,11 +1819,12 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             label=(f'{n//1000}k' if n >= 1000 else str(n)),
         ))
     height_steps = [dict(method='skip', label=f'{h} m') for h in heights]
-    count_steps = [dict(method='skip', label=f'{c}') for c in counts]
+    count_steps = ([dict(method='skip', label='0')]
+                   + [dict(method='skip', label=f'{c}') for c in counts])
 
     sliders = [
         dict(
-            active=DEFAULT_GLYPH_IDX,
+            active=0,  # glyphs off by default (step 0)
             x=0.05, y=0.04, len=0.27, xanchor='left', yanchor='top',
             currentvalue=dict(prefix='Glyph density: ', font=dict(size=12)),
             steps=glyph_steps, pad=dict(t=10, b=4),
@@ -1813,7 +1838,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             name='stream_height',
         ),
         dict(
-            active=default_c_idx,
+            active=default_c_idx + 1,  # +1: slider step 0 is the '0' state
             x=0.68, y=0.04, len=0.27, xanchor='left', yanchor='top',
             currentvalue=dict(prefix='Streamline count: ', font=dict(size=12)),
             steps=count_steps, pad=dict(t=10, b=4),
@@ -1850,33 +1875,30 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             aspectratio=aspect,
             camera=dict(eye=dict(x=1.5, y=-1.5, z=0.9)),
         ),
+        # No legend: terrain and structures are always shown; glyphs and
+        # streamlines are hidden via the 0 position of their sliders.
         margin=dict(l=0, r=0, b=140, t=90),
-        showlegend=True,
-        legend=dict(
-            itemsizing='constant',
-            x=0.02, y=0.95,
-            bgcolor='rgba(255,255,255,0.85)',
-            bordercolor='#888', borderwidth=1,
-        ),
+        showlegend=False,
         sliders=sliders,
         updatemenus=[
-            # Ground colour mode — same placement as the global view.
+            # Ground colour mode — vertical stack top-left, same placement
+            # as the global view.
             dict(
-                type='buttons', direction='right',
+                type='buttons', direction='down',
                 buttons=[
-                    dict(label='Ground: relative pressure', method='restyle',
+                    dict(label='relative pressure', method='restyle',
                          args=[{'visible': [True, False, False]}, terrain_idx]),
-                    dict(label='Ground: elevation', method='restyle',
+                    dict(label='elevation', method='restyle',
                          args=[{'visible': [False, True, False]}, terrain_idx]),
-                    dict(label='Ground: snow drift', method='restyle',
+                    dict(label='snow drift', method='restyle',
                          args=[{'visible': [False, False, True]}, terrain_idx]),
                 ],
-                x=0.05, y=1.02, xanchor='left', yanchor='bottom',
+                x=0.01, y=0.94, xanchor='left', yanchor='top',
                 showactive=True, active=0,
                 bgcolor='#f0f0f0', bordercolor='#888',
             ),
-            # Streamline direction — bottom-right above the count slider,
-            # same placement as the global view.
+            # Streamline direction — tight above the count slider, same
+            # placement as the global view.
             dict(
                 type='buttons', direction='right',
                 buttons=[
@@ -1884,7 +1906,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                     dict(label='← backward', method='skip', args=[{'_direction': 'backward'}]),
                     dict(label='↔ both', method='skip', args=[{'_direction': 'both'}]),
                 ],
-                x=0.68, y=0.13, xanchor='left', yanchor='bottom',
+                x=0.68, y=0.055, xanchor='left', yanchor='bottom',
                 showactive=True, active=0,
                 bgcolor='#eaf2ff', bordercolor='#0d47a1',
                 name='stream_direction',
@@ -1897,10 +1919,21 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                 x=0.02, y=0.18, xanchor='left', yanchor='top',
                 showarrow=False, font=dict(size=14, color='#0d47a1'),
             ),
+            # Label BESIDE the fwd/bwd/both buttons (same baseline): the
+            # buttons are bottom-anchored and grow upward by a fixed pixel
+            # height, so any label placed above them overlaps on short
+            # windows; a side label is height-independent.
             dict(
-                text='<i>Streamlines: integration mode</i>',
+                text='<i>Streamlines:</i>',
                 xref='paper', yref='paper',
-                x=0.68, y=0.205, xanchor='left', yanchor='bottom',
+                x=0.675, y=0.057, xanchor='right', yanchor='bottom',
+                showarrow=False, font=dict(size=11, color='#0d47a1'),
+            ),
+            # Label just above the vertical ground-colour buttons.
+            dict(
+                text='<i>Ground:</i>',
+                xref='paper', yref='paper',
+                x=0.01, y=0.945, xanchor='left', yanchor='bottom',
                 showarrow=False, font=dict(size=11, color='#0d47a1'),
             ),
         ],
@@ -1914,8 +1947,9 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         'n_heights': n_h,
         'n_counts': n_c,
         'default_h_idx': default_h_idx,
-        'default_c_idx': default_c_idx,
+        'default_c_idx': default_c_idx + 1,  # slider index (0 = hidden)
         'default_direction': 'forward',
+        'wake_indices': [int(i) for i in wake_indices],
     }
     return fig, meta_for_js
 

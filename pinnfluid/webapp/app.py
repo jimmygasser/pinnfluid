@@ -603,7 +603,7 @@ def _sampling_section_html() -> str:
 
 _PREDICT_SCRIPT = r"""
 <div id="predict-panel" style="
-  position:fixed; left:0; top:0; width:calc(100% - 380px); height:100vh;
+  position:fixed; left:0; top:0; width:calc(100% - var(--sbw, 380px)); height:100vh;
   background:rgba(255,255,255,0.97); z-index:2000; display:none;
   overflow-y:auto; padding:20px 28px; box-shadow:inset 0 0 24px rgba(0,0,0,0.06);
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
@@ -641,6 +641,16 @@ _PREDICT_SCRIPT = r"""
   border-radius:4px; font-size:13px; font-weight:500; border:none; cursor:pointer;
 }
 .rprt-btn:hover { filter:brightness(1.1); }
+#predict-panel { transition:width .25s ease; }
+body.nosb #predict-panel { width:100% !important; }
+@media (max-width:820px) {
+  #predict-panel { width:100% !important; padding:16px !important; }
+  /* The interactive map layout is desktop-sized (square aspect, side
+     legend + colorbar): on phones the embedded iframe renders it as a
+     stamp, so hide the embed there. The map button still opens the
+     full page for anyone who wants it. */
+  #predict-map, #predict-map-hint { display:none !important; }
+}
 #predict-stats table { border-collapse:collapse; font-size:13px; }
 #predict-stats th { text-align:left; background:#f5f5f5; padding:8px 12px; border-bottom:2px solid #ddd; font-weight:600; color:#37474f; }
 #predict-stats td { padding:8px 12px; border-bottom:1px solid #eee; }
@@ -928,6 +938,11 @@ function renderReport(payload) {
   renderPlotsSection(payload, plots);
   plots.style.display = 'none';
   document.querySelector('#predict-plot-toggle button').innerHTML = 'Show plots ▾';
+
+  // Phone: the embedded map is hidden there (see the ≤820px media rule), so
+  // open the summary values as the default content; plots stay one tap away.
+  // The wind-rose path opens them unconditionally already.
+  if (window.innerWidth <= 820) { toggleValues(); }
 
   panel.style.display = 'block';
 }
@@ -1454,8 +1469,12 @@ def _sampling_points_to_local(body: dict, transform_meta: Optional[dict]) -> lis
         if pivot and len(pivot) >= 2 and e is not None and n is not None:
             de = float(e) - float(pivot[0])
             dn = float(n) - float(pivot[1])
-            rec["x"] = de * math.cos(theta) + dn * math.sin(theta) + 0.5 * W
-            rec["y"] = -de * math.sin(theta) + dn * math.cos(theta) + 0.5 * H
+            # Same rotation as place_structure.crs_to_local (the structure
+            # path): local = R(+theta)(p - pivot) + centre. The previous
+            # inverse rotation only agreed at theta = 0 (wind from 270), so
+            # sampling points drifted geographically across wind-rose sectors.
+            rec["x"] = de * math.cos(theta) - dn * math.sin(theta) + 0.5 * W
+            rec["y"] = de * math.sin(theta) + dn * math.cos(theta) + 0.5 * H
         out.append(rec)
     return out
 

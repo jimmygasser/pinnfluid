@@ -89,12 +89,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
 <style>
   * { box-sizing:border-box; }
+  :root { --sbw: 380px; }
   body { margin:0; padding:0; font-family:'Segoe UI',-apple-system,sans-serif; }
   #sidebar {
-    position:absolute; top:0; right:0; z-index:1000;
-    width:380px; height:100vh; background:#fff;
+    position:absolute; top:0; right:0; z-index:2050;
+    width:var(--sbw); height:100vh; background:#fff;
     box-shadow:-2px 0 16px rgba(0,0,0,0.15);
     display:flex; flex-direction:column; overflow-y:auto;
+    transition:transform .25s ease;
   }
   #sidebar-header {
     background:linear-gradient(135deg,#1565C0,#1976D2);
@@ -142,20 +144,40 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #sel-info { font-size:11px; line-height:1.5; color:#555; min-height:18px; }
   #sel-info b { color:#333; }
   .help { font-size:10px; color:#999; margin-top:2px; }
-  #map { position:absolute; top:0; left:0; right:380px; height:100vh; }
+  #map { position:absolute; top:0; left:0; right:var(--sbw); height:100vh; transition:right .25s ease; }
   #status {
     position:absolute; bottom:12px; left:12px; z-index:1000;
     background:rgba(255,255,255,0.95); padding:10px 14px; border-radius:6px;
     box-shadow:0 2px 8px rgba(0,0,0,0.15);
     font-family:Consolas,monospace; font-size:11px;
-    max-width:calc(100vw - 420px);
+    max-width:calc(100vw - var(--sbw) - 40px);
   }
   #status.ok { border-left:3px solid #4CAF50; }
+  #sb-toggle {
+    position:fixed; top:50%; right:var(--sbw); transform:translateY(-50%);
+    z-index:2100; width:22px; height:64px; cursor:pointer;
+    background:#1976D2; color:#fff; border-radius:6px 0 0 6px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:20px; user-select:none; box-shadow:-2px 0 8px rgba(0,0,0,0.25);
+    transition:right .25s ease;
+  }
+  #sb-toggle:hover { background:#1565C0; }
+  body.nosb #sidebar { transform:translateX(110%); }
+  body.nosb #sb-toggle { right:0; }
+  body.nosb #map { right:0; }
+  body.nosb #status { max-width:calc(100vw - 40px); }
+  @media (max-width:820px) {
+    :root { --sbw: min(380px, 88vw); }
+    #map { right:0; }
+    #status { max-width:calc(100vw - 40px); }
+    input[type=text], input[type=number], select { font-size:16px; }
+  }
   #status.err { border-left:3px solid #e53935; }
   #status.busy { border-left:3px solid #FF9800; }
 </style>
 </head><body>
 <div id="map"></div>
+<div id="sb-toggle" onclick="toggleSidebar()" title="Show / hide the menu">›</div>
 
 <div id="sidebar">
   <div id="sidebar-header">
@@ -1168,6 +1190,19 @@ function _resetCustomDem() {
 function setStatus(msg, cls) {
   var el=document.getElementById('status');
   el.innerText=msg; el.className=cls||'';
+}
+
+// --- Collapsible sidebar: desktop slide-away handle, phone off-canvas drawer ---
+function toggleSidebar() {
+  var c = document.body.classList;
+  c.toggle('nosb');
+  document.getElementById('sb-toggle').textContent = c.contains('nosb') ? '‹' : '›';
+  // Leaflet does not observe container resizes; refresh after the transition.
+  setTimeout(function() { try { map.invalidateSize(); } catch (e) {} }, 280);
+}
+if (window.innerWidth <= 820) {
+  document.body.classList.add('nosb');
+  document.getElementById('sb-toggle').textContent = '‹';
 }
 </script>
 </body></html>"""
