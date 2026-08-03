@@ -126,11 +126,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-primary:disabled { background:#ccc; cursor:not-allowed; }
   .btn-secondary { background:#f5f5f5; color:#555; border:1px solid #ddd; }
   .btn-secondary:hover { background:#eee; }
+  .btn-secondary:disabled { background:#fafafa; color:#ccc; border-color:#f0f0f0; cursor:not-allowed; }
+  input[type=text]:disabled, input[type=number]:disabled, select:disabled { background:#f5f5f5; color:#aaa; cursor:not-allowed; }
   .btn-danger { background:#e53935; color:white; }
   .btn-danger:hover { background:#c62828; }
   .btn-success { background:#43A047; color:white; }
   .btn-success:hover { background:#388E3C; }
-  .btn-success:disabled { background:#ccc; cursor:not-allowed; }
+  .btn-success:disabled { background:#43A047; opacity:0.85; cursor:not-allowed; }
+  .btn-progress { background: linear-gradient(90deg, #43A047 var(--p,0%), #1976D2 var(--p,0%)) !important; color:#fff !important; }
   .checkbox-row { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
   .checkbox-row input { margin:0; }
   .checkbox-row label { margin:0; font-size:12px; }
@@ -247,7 +250,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="help">CRS must be projected (LV95, UTM, ...) in metres. North-up.</div>
     </div>
     <p style="font-size:11px; color:#666; margin:0 0 6px 0;" id="terrainHelp">
-      <b>Click</b> on the map to select terrain center, or <b>draw rectangle</b>.
+      <b>Click</b> on the map to select a region of the chosen size, or use the <b>draw tool</b> (top left) to define a custom size (up to 3&times;3 km).
     </p>
     <div id="sel-info"></div>
     <button class="btn btn-primary" id="btnDownloadDEM" onclick="downloadDEM()" disabled>
@@ -408,10 +411,21 @@ var terrainCenter = null;
 var demReady = false;
 var terrainLocked = false;  // locks terrain after DEM download
 var structures = []; // {lat, lng, type, yaw, label}
+var customDomainSize = null;   // metres; set by the draw tool, cleared by presets/clicks
+var drawingActive = false;     // true while the leaflet-draw rectangle tool is engaged
+var structuresLocked = false;  // set after Confirm structures; cleared by resets
+
+function effDomainSize() {
+  if (customDomainSize) return customDomainSize;
+  return parseFloat(document.getElementById('domainSize').value);
+}
+
+map.on(L.Draw.Event.DRAWSTART, function() { drawingActive = true; });
+map.on(L.Draw.Event.DRAWSTOP,  function() { drawingActive = false; });
 
 function getBoxKm() {
   // Add 50% margin so rotated domain always fits inside the downloaded DEM
-  return parseFloat(document.getElementById('domainSize').value) / 1000.0 * 1.5;
+  return effDomainSize() / 1000.0 * 1.5;
 }
 
 var previewGroup = L.layerGroup().addTo(map);  // all preview layers in one group
@@ -419,9 +433,14 @@ var previewGroup = L.layerGroup().addTo(map);  // all preview layers in one grou
 function drawDomainPreview(lat, lng) {
   previewGroup.clearLayers();
 
-  var domSizeM = parseFloat(document.getElementById('domainSize').value);
+  var domSizeM = effDomainSize();
   var windFrom = parseFloat(document.getElementById('windFrom').value);
   if (isNaN(windFrom)) windFrom = 270;
+  // Over an uploaded custom DEM the orange square shows the actually-used
+  // region: the largest wind-rotated square that fits (capped by the preset
+  // size). Before terrain is confirmed it can be dragged to reposition it.
+  var isCustom = (typeof customDemActive === 'function' && customDemActive());
+  if (isCustom) domSizeM = customEffSize();
   var halfM = domSizeM / 2.0;
   var cosLat = Math.cos(lat * Math.PI / 180);
 
@@ -446,18 +465,23 @@ function drawDomainPreview(lat, lng) {
   // Unrotated corners in metres: domain's local +x and +y axes
   // After rotation, +x points at bearing windTo
   var cornersLocal = [[-halfM,-halfM],[ halfM,-halfM],[ halfM, halfM],[-halfM, halfM]];
-  var cornersLL = cornersLocal.map(function(c) {
-    // c[0] = along domain +x, c[1] = along domain +y
-    // Domain +x in geo: easting = cos(xAxisRad), northing = sin(xAxisRad)
-    // Domain +y in geo: easting = -sin(xAxisRad), northing = cos(xAxisRad)
-    var easting  = c[0] * Math.cos(xAxisRad) - c[1] * Math.sin(xAxisRad);
-    var northing = c[0] * Math.sin(xAxisRad) + c[1] * Math.cos(xAxisRad);
-    return [lat + mToLat(northing), lng + mToLng(easting)];
-  });
+  function _cornersAt(cLat, cLng) {
+    var cl = Math.cos(cLat * Math.PI / 180);
+    return cornersLocal.map(function(c) {
+      // c[0] = along domain +x, c[1] = along domain +y
+      // Domain +x in geo: easting = cos(xAxisRad), northing = sin(xAxisRad)
+      // Domain +y in geo: easting = -sin(xAxisRad), northing = cos(xAxisRad)
+      var easting  = c[0] * Math.cos(xAxisRad) - c[1] * Math.sin(xAxisRad);
+      var northing = c[0] * Math.sin(xAxisRad) + c[1] * Math.cos(xAxisRad);
+      return [cLat + northing / 111320.0, cLng + easting / (111320.0 * cl)];
+    });
+  }
+  var cornersLL = _cornersAt(lat, lng);
 
-  previewGroup.addLayer(L.polygon(cornersLL, {
+  var domPoly = L.polygon(cornersLL, {
     color:'#E65100', weight:2, fillOpacity:0.08
-  }));
+  });
+  previewGroup.addLayer(domPoly);
 
   // Wind arrow: wind blows FROM windFrom direction TOWARD center
   // windFrom bearing in math angle:
@@ -492,6 +516,26 @@ function drawDomainPreview(lat, lng) {
   ], {
     color:'#D32F2F', weight:1, fillColor:'#D32F2F', fillOpacity:0.8
   }));
+
+  // Custom DEM, before "Confirm terrain & wind": the square is draggable so
+  // the user chooses which part of the DEM becomes the domain.
+  if (isCustom && !customConfirmed) {
+    var dragIcon = L.divIcon({
+      className:'',
+      html:'<div style="width:16px;height:16px;background:#E65100;border:2px solid #fff;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:move;"></div>',
+      iconSize:[16,16], iconAnchor:[8,8]
+    });
+    var mk = L.marker([lat, lng], {draggable:true, icon:dragIcon, title:'Drag to reposition the domain'});
+    mk.on('drag', function(ev) {
+      var p = _clampCustomCenter(ev.target.getLatLng().lat, ev.target.getLatLng().lng);
+      domPoly.setLatLngs(_cornersAt(p.lat, p.lng));
+    });
+    mk.on('dragend', function(ev) {
+      var p = ev.target.getLatLng();
+      moveCustomDomain(p.lat, p.lng);
+    });
+    previewGroup.addLayer(mk);
+  }
 }
 
 function clearPreview() {
@@ -500,17 +544,24 @@ function clearPreview() {
 
 // Update preview when wind direction or domain size changes
 document.getElementById('windFrom').addEventListener('change', function() {
-  if (terrainCenter) drawDomainPreview(terrainCenter.lat, terrainCenter.lng);
+  if (!terrainCenter) return;
+  if (typeof customDemActive === 'function' && customDemActive()) {
+    moveCustomDomain(terrainCenter.lat, terrainCenter.lng);  // fit size changed
+    return;
+  }
+  drawDomainPreview(terrainCenter.lat, terrainCenter.lng);
 });
 document.getElementById('domainSize').addEventListener('change', function() {
+  customDomainSize = null;  // choosing a preset overrides a drawn custom size
+  if (terrainCenter && typeof customDemActive === 'function' && customDemActive()) {
+    customSizeChosen = true;  // an active pick caps the auto largest-fit size
+    moveCustomDomain(terrainCenter.lat, terrainCenter.lng);
+    return;
+  }
   if (terrainCenter && !terrainLocked) {
-    // Redraw outer box too
-    drawnTerrain.clearLayers();
     var lat=terrainCenter.lat, lng=terrainCenter.lng, half=getBoxKm()/2;
     var dLat=half/111.32, dLng=half/(111.32*Math.cos(lat*Math.PI/180));
-    var b = L.latLngBounds([lat-dLat,lng-dLng],[lat+dLat,lng+dLng]);
-    drawnTerrain.addLayer(L.rectangle(b, {color:'#1976D2',weight:1,fillOpacity:0.05,dashArray:'6 4'}));
-    terrainBounds = b;
+    terrainBounds = L.latLngBounds([lat-dLat,lng-dLng],[lat+dLat,lng+dLng]);
   }
   if (terrainCenter) drawDomainPreview(terrainCenter.lat, terrainCenter.lng);
 });
@@ -519,6 +570,12 @@ document.getElementById('domainSize').addEventListener('change', function() {
 map.on('click', function(e) {
   // If terrain is locked (DEM downloaded or flat), clicks place structures or grid
   if (terrainLocked || demReady) {
+    // Custom DEM before "Confirm terrain & wind": clicks reposition the
+    // domain square instead of placing anything.
+    if (typeof customDemActive === 'function' && customDemActive() && !customConfirmed) {
+      moveCustomDomain(e.latlng.lat, e.latlng.lng);
+      return;
+    }
     // Grid mode: each click replaces the grid position
     if (document.getElementById('enableGrid').checked) {
       addGridAtLatLng(e.latlng.lat, e.latlng.lng);
@@ -530,14 +587,15 @@ map.on('click', function(e) {
     return;
   }
   // Otherwise, select terrain
+  if (drawingActive) return;  // the draw tool owns clicks while engaged
   if (document.getElementById('flatTerrain').checked) return;
   // Custom-DEM mode: terrain selection comes from the upload, not map clicks.
   if (document.getElementById('customDem').checked) return;
   drawnTerrain.clearLayers();
+  customDomainSize = null;  // a plain click uses the preset size
   var lat=e.latlng.lat, lng=e.latlng.lng, half=getBoxKm()/2;
   var dLat=half/111.32, dLng=half/(111.32*Math.cos(lat*Math.PI/180));
   var b = L.latLngBounds([lat-dLat,lng-dLng],[lat+dLat,lng+dLng]);
-  drawnTerrain.addLayer(L.rectangle(b, {color:'#1976D2',weight:1,fillOpacity:0.05,dashArray:'6 4'}));
   terrainBounds = b;
   terrainCenter = {lat:lat, lng:lng};
   drawDomainPreview(lat, lng);
@@ -547,12 +605,27 @@ map.on('click', function(e) {
 });
 
 map.on(L.Draw.Event.CREATED, function(e) {
+  drawingActive = false;
   if (terrainLocked || demReady) return;
   if (document.getElementById('customDem').checked) return;
+  // The drawn rectangle defines a CUSTOM-SIZE domain: the largest square that
+  // fits in the drawing (a square rotates with any wind direction without
+  // changing size). Rendered exactly like a clicked domain (orange + arrow).
+  var b0 = e.layer.getBounds();
+  var sw0 = b0.getSouthWest(), ne0 = b0.getNorthEast();
+  var midLat = (sw0.lat + ne0.lat) / 2;
+  var wM = (ne0.lng - sw0.lng) * 111320.0 * Math.cos(midLat * Math.PI / 180);
+  var hM = (ne0.lat - sw0.lat) * 111320.0;
+  var side = Math.round(Math.min(wM, hM) / 10) * 10;
+  side = Math.max(200, Math.min(3000, side));
+  customDomainSize = side;
+  var c = b0.getCenter();
+  terrainCenter = {lat: c.lat, lng: c.lng};
+  var half = getBoxKm() / 2;
+  var dLat = half / 111.32, dLng = half / (111.32 * Math.cos(c.lat * Math.PI / 180));
+  terrainBounds = L.latLngBounds([c.lat - dLat, c.lng - dLng], [c.lat + dLat, c.lng + dLng]);
   drawnTerrain.clearLayers();
-  drawnTerrain.addLayer(e.layer);
-  terrainBounds = e.layer.getBounds();
-  terrainCenter = terrainBounds.getCenter();
+  drawDomainPreview(c.lat, c.lng);
   showTerrainInfo(terrainBounds);
   demReady = false;
   document.getElementById('demStatus').innerText = '';
@@ -560,11 +633,10 @@ map.on(L.Draw.Event.CREATED, function(e) {
 
 function showTerrainInfo(b) {
   var sw=b.getSouthWest(), ne=b.getNorthEast();
-  var wKm=(ne.lng-sw.lng)*111.32*Math.cos((sw.lat+ne.lat)/2*Math.PI/180);
-  var hKm=(ne.lat-sw.lat)*111.32;
+  var sizeM = effDomainSize();
   document.getElementById('sel-info').innerHTML=
     '<b>Center:</b> '+terrainCenter.lat.toFixed(5)+', '+terrainCenter.lng.toFixed(5)+'<br>'+
-    '<b>Size:</b> ~'+wKm.toFixed(1)+' &times; '+hKm.toFixed(1)+' km';
+    '<b>Domain:</b> '+(customDomainSize ? 'custom ' : '')+sizeM.toFixed(0)+' &times; '+sizeM.toFixed(0)+' m';
   document.getElementById('btnDownloadDEM').disabled = false;
   updateBuildBtn();
 }
@@ -586,7 +658,7 @@ document.getElementById('flatTerrain').addEventListener('change', function() {
     var dLat = half/111.32, dLng = half/(111.32*Math.cos(lakeLat*Math.PI/180));
     var b = L.latLngBounds([lakeLat-dLat,lakeLng-dLng],[lakeLat+dLat,lakeLng+dLng]);
     drawnTerrain.clearLayers();
-    drawnTerrain.addLayer(L.rectangle(b, {color:'#1976D2',weight:1,fillOpacity:0.05,dashArray:'6 4'}));
+    customDomainSize = null;
     terrainBounds = b;
     drawDomainPreview(lakeLat, lakeLng);
     map.setView([lakeLat, lakeLng], 14);
@@ -615,7 +687,7 @@ function resetTerrain() {
     document.getElementById('btnDownloadDEM').style.display = '';
     _showSwissTiles();
     var helpEl = document.getElementById('terrainHelp');
-    if (helpEl) helpEl.innerHTML = '<b>Click</b> on the map to select terrain center, or <b>draw rectangle</b>.';
+    if (helpEl) helpEl.innerHTML = '<b>Click</b> on the map to select a region of the chosen size, or use the <b>draw tool</b> (top left) to define a custom size (up to 3&times;3 km).';
   }
   demReady = false;
   terrainLocked = false;
@@ -630,8 +702,10 @@ function resetTerrain() {
   document.getElementById('sel-info').innerHTML = '';
   var btn = document.getElementById('btnDownloadDEM');
   btn.disabled = false;
-  // Reset confirm-terrain button colour back to "needs action" (blue).
-  btn.classList.remove('btn-success'); btn.classList.add('btn-primary');
+  btnProgressReset(btn);
+  customDomainSize = null;
+  setTerrainLockedUI(false);
+  setStructuresLockedUI(false);
   document.getElementById('btnResetTerrain').style.display = 'none';
   document.getElementById('flatTerrain').checked = false;
   updateBuildBtn();
@@ -646,6 +720,7 @@ var redIcon = L.divIcon({
 });
 
 function addStructAtLatLng(lat, lng) {
+  if (structuresLocked) { setStatus('Structures are confirmed — use "Reset structures" to change them.', 'err'); return; }
   var type = document.getElementById('structType').value;
   var yaw = parseFloat(document.getElementById('structYaw').value);
   if (!Number.isFinite(yaw)) yaw = 0;
@@ -686,6 +761,7 @@ function addStructManual() {
 }
 
 function clearStructures() {
+  if (structuresLocked) { setStatus('Structures are confirmed — use "Reset structures" to change them.', 'err'); return; }
   structures = [];
   structMarkers.clearLayers();
   renderStructList();
@@ -735,6 +811,7 @@ document.getElementById('structYaw').addEventListener('input', syncPlacedStructu
 document.getElementById('structYaw').addEventListener('change', syncPlacedStructureYaw);
 
 function removeStruct(i) {
+  if (structuresLocked) { setStatus('Structures are confirmed — use "Reset structures" to change them.', 'err'); return; }
   structures.splice(i, 1);
   structures.forEach(function(s, idx) {
     s.label = s.label.split(' #')[0] + ' #' + (idx+1);
@@ -755,11 +832,25 @@ document.getElementById('domainName').addEventListener('input', updateBuildBtn);
 // --- DEM Download ---
 function downloadDEM() {
   if (!terrainBounds) return;
-  var sw = terrainBounds.getSouthWest(), ne = terrainBounds.getNorthEast();
   var name = document.getElementById('domainName').value.trim();
   if (!name) { setStatus('Enter a domain name first','err'); return; }
+  var dlBtn = document.getElementById('btnDownloadDEM');
+  if (typeof customDemActive === 'function' && customDemActive()) {
+    // Custom-DEM path: the DEM is already uploaded — this click locks
+    // terrain, wind and the domain-square position.
+    btnProgressStart(dlBtn, 1); btnProgressDone(dlBtn, true);
+    dlBtn.disabled = true;
+    customConfirmed = true;
+    setTerrainLockedUI(true);
+    if (terrainCenter) drawDomainPreview(terrainCenter.lat, terrainCenter.lng);  // drop the drag handle
+    document.getElementById('demStatus').innerText = 'Domain confirmed — click inside the orange square to place structures';
+    setStatus('Terrain & wind confirmed. Now place structures (optional) or predict.', 'ok');
+    return;
+  }
+  var sw = terrainBounds.getSouthWest(), ne = terrainBounds.getNorthEast();
   setStatus('Downloading DEM tiles...','busy');
-  document.getElementById('btnDownloadDEM').disabled = true;
+  dlBtn.disabled = true;
+  btnProgressStart(dlBtn, 12);
   fetch('/download_dem', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -773,17 +864,19 @@ function downloadDEM() {
       terrainLocked = true;
       document.getElementById('demStatus').innerText = 'DEM ready: ' + (d.dem_size||'') + ' — click map to place structures';
       document.getElementById('btnResetTerrain').style.display = 'block';
-      // Confirm-terrain button → green to signal "ready, move on".
       var btn = document.getElementById('btnDownloadDEM');
-      btn.classList.remove('btn-primary'); btn.classList.add('btn-success');
-      setStatus('DEM downloaded. Now click on map to place structures.', 'ok');
+      btnProgressDone(btn, true);
+      setTerrainLockedUI(true);
+      setStatus('Terrain & wind confirmed. Now place structures (optional) or predict.', 'ok');
       updateBuildBtn();
     } else {
       setStatus('DEM error: ' + d.error, 'err');
+      btnProgressReset(document.getElementById('btnDownloadDEM'));
+      document.getElementById('btnDownloadDEM').disabled = false;
     }
-    document.getElementById('btnDownloadDEM').disabled = false;
   }).catch(function(e) {
     setStatus('DEM error: '+e, 'err');
+    btnProgressReset(document.getElementById('btnDownloadDEM'));
     document.getElementById('btnDownloadDEM').disabled = false;
   });
 }
@@ -791,7 +884,7 @@ function downloadDEM() {
 // --- Build Domain ---
 function buildDomain() {
   var name = document.getElementById('domainName').value.trim();
-  var domSize = parseInt(document.getElementById('domainSize').value);
+  var domSize = Math.round(effDomainSize());
   var windFrom = parseInt(document.getElementById('windFrom').value);
   var flat = document.getElementById('flatTerrain').checked;
   if (!name) { setStatus('Enter a domain name','err'); return; }
@@ -895,6 +988,7 @@ document.getElementById('enableGrid').addEventListener('change', function() {
 
 function addGridAtLatLng(lat, lng) {
   if (!document.getElementById('enableGrid').checked) return false;
+  if (structuresLocked) { setStatus('Structures are confirmed — use "Reset structures" to change them.', 'err'); return false; }
   var gcrs = _latlngToCrs(lat, lng);
   gridCenter = {lat:lat, lng:lng};
   if (gcrs) { gridCenter.crs_x = gcrs[0]; gridCenter.crs_y = gcrs[1]; }
@@ -991,6 +1085,65 @@ var swissBaseLayers = [];   // tile layers we hide while custom DEM is active
 
 function customDemActive() { return customDem !== null && customDem.imgLayer; }
 
+var customConfirmed = false;   // "Confirm terrain & wind" freezes the square
+var customSizeChosen = false;  // user actively picked a preset while the DEM was loaded
+
+// |cos|+|sin| of the domain rotation: ratio between the rotated square's
+// bounding box and its side. theta = wind_to - 90 = wind_from + 90.
+function customFitFactor(windFromDeg) {
+  var th = ((windFromDeg + 90) % 360) * Math.PI / 180;
+  return Math.abs(Math.cos(th)) + Math.abs(Math.sin(th));
+}
+// Effective square side (m): preset size capped by the largest wind-rotated
+// square that fits in the DEM. Must match the _collectBody() cap exactly —
+// the server crops what this square shows.
+function customUsableSize() {
+  var wf = parseFloat(document.getElementById('windFrom').value);
+  if (!Number.isFinite(wf)) wf = 270;
+  var fac = Math.max(customFitFactor(wf), 1.0);
+  return Math.floor(Math.min(customDem.w_m, customDem.h_m) / fac);
+}
+function customEffSize() {
+  if (!customDemActive()) return effDomainSize();
+  var usable = customUsableSize();
+  // Default to the largest fit; the preset caps it only once the user
+  // actively picks a size while the DEM is loaded.
+  if (!customSizeChosen) return usable;
+  return Math.min(effDomainSize(), usable);
+}
+// Clamp a candidate centre so the wind-rotated square stays inside the DEM
+// (2 m safety margin — dem_prep reads non-boundless windows).
+function _clampCustomCenter(lat, lng) {
+  var ob = customDem.overlayBounds;
+  var wf = parseFloat(document.getElementById('windFrom').value);
+  if (!Number.isFinite(wf)) wf = 270;
+  var hb = customEffSize() * customFitFactor(wf) / 2 + 2.0;
+  var cosLat = Math.cos(lat * Math.PI / 180);
+  var hbLat = hb / 111320.0, hbLng = hb / (111320.0 * cosLat);
+  var la = Math.min(Math.max(lat, ob.getSouth() + hbLat), ob.getNorth() - hbLat);
+  var ln = Math.min(Math.max(lng, ob.getWest() + hbLng), ob.getEast() - hbLng);
+  // A fully-used axis leaves no room to slide: pin to the DEM centre line.
+  if (ob.getSouth() + hbLat > ob.getNorth() - hbLat) la = (ob.getSouth() + ob.getNorth()) / 2;
+  if (ob.getWest() + hbLng > ob.getEast() - hbLng)  ln = (ob.getWest() + ob.getEast()) / 2;
+  return {lat: la, lng: ln};
+}
+function moveCustomDomain(lat, lng) {
+  if (!customDemActive() || customConfirmed) return;
+  var c = _clampCustomCenter(lat, lng);
+  terrainCenter = {lat: c.lat, lng: c.lng};
+  drawDomainPreview(c.lat, c.lng);
+  _updateCustomSelInfo();
+}
+function _updateCustomSelInfo() {
+  if (!customDemActive()) return;
+  var s = customEffSize();
+  var note = (s >= customUsableSize()) ? 'largest fit for this wind' : 'selected size';
+  document.getElementById('sel-info').innerHTML =
+    '<b>Custom DEM:</b> ' + customDem.w_m.toFixed(0) + ' x ' + customDem.h_m.toFixed(0) + ' m'
+    + '<br><b>Domain:</b> ' + s + ' &times; ' + s + ' m (orange square — ' + note + ')'
+    + '<br><b>CRS:</b> <code style="font-size:10px;">' + customDem.crs + '</code>';
+}
+
 function _collectSwissTileLayers() {
   if (swissBaseLayers.length > 0) return;
   map.eachLayer(function(l) {
@@ -1044,14 +1197,15 @@ document.getElementById('customDem').addEventListener('change', function() {
     demReady = false;
     terrainLocked = false;
     var helpEl = document.getElementById('terrainHelp');
-    if (helpEl) helpEl.innerHTML = '<b>Upload</b> a projected GeoTIFF (max 3x3 km), then click on it to place structures.';
+    if (helpEl) helpEl.innerHTML = '<b>Upload</b> a projected GeoTIFF (max 3x3 km) — or simply <b>drag &amp; drop</b> it onto the map. Set the wind direction, then confirm.';
     document.getElementById('btnDownloadDEM').style.display = 'none';
     document.getElementById('sel-info').innerHTML = '';
-    _hideSwissTiles();
+    // Swiss tiles stay visible until the upload succeeds (_installCustomDem
+    // hides them) — no white page while choosing the file.
   } else {
     if (customDem) _resetCustomDem();
     var helpEl2 = document.getElementById('terrainHelp');
-    if (helpEl2) helpEl2.innerHTML = '<b>Click</b> on the map to select terrain center, or <b>draw rectangle</b>.';
+    if (helpEl2) helpEl2.innerHTML = '<b>Click</b> on the map to select a region of the chosen size, or use the <b>draw tool</b> (top left) to define a custom size (up to 3&times;3 km).';
     document.getElementById('btnDownloadDEM').style.display = '';
     _showSwissTiles();
   }
@@ -1104,7 +1258,7 @@ function uploadCustomDEM() {
       return;
     }
     _installCustomDem(d);
-    setStatus('Custom DEM ready ('+d.dem_size+'). Click on it to place structures.','ok');
+    setStatus('Custom DEM ready ('+d.dem_size+'). Position the orange domain square (drag or click), set the wind, then Confirm terrain & wind.','ok');
     document.getElementById('btnUploadDEM').disabled = false;
     document.getElementById('btnUploadDEM').classList.remove('btn-primary');
     document.getElementById('btnUploadDEM').classList.add('btn-success');
@@ -1137,25 +1291,28 @@ function _installCustomDem(d) {
     w_m: d.width_m,
     h_m: d.height_m,
   };
-  // Lock terrain at the DEM centre — clicks now place structures, not terrain.
+  // Terrain comes from the upload — clicks/drag now position the domain
+  // square (frozen later by "Confirm terrain & wind").
   terrainBounds = ob;
   terrainCenter = {lat: fakeLat, lng: fakeLng};
   demReady = true;
   terrainLocked = true;
+  customConfirmed = false;
+  customSizeChosen = false;
   drawnTerrain.clearLayers();
-  drawnTerrain.addLayer(L.rectangle(ob, {color:'#1976D2', weight:1, fillOpacity:0.0, dashArray:'6 4'}));
   drawDomainPreview(fakeLat, fakeLng);
+  _updateCustomSelInfo();
   map.fitBounds(ob, {padding:[20,20]});
-  document.getElementById('sel-info').innerHTML =
-    '<b>Custom DEM:</b> ' + d.width_m.toFixed(0) + ' x ' + d.height_m.toFixed(0) + ' m'
-    + '<br><b>CRS:</b> <code style="font-size:10px;">' + d.crs + '</code>';
   document.getElementById('btnResetTerrain').style.display = 'block';
-  document.getElementById('demStatus').innerText = 'DEM ready: ' + d.dem_size + ' — click on it to place structures';
+  document.getElementById('demStatus').innerText = 'DEM ready: ' + d.dem_size + ' — drag or click to position the orange domain square, set the wind, then confirm';
   // Update structure manual-coord placeholders to "X (CRS)" / "Y (CRS)".
   var sE = document.getElementById('structE'); if (sE) sE.placeholder = 'X (CRS)';
   var sN = document.getElementById('structN'); if (sN) sN.placeholder = 'Y (CRS)';
   var gE = document.getElementById('gridE');   if (gE) gE.placeholder = 'X (CRS)';
   var gN = document.getElementById('gridN');   if (gN) gN.placeholder = 'Y (CRS)';
+  // The (renamed) confirm button reappears so terrain & wind can be locked.
+  var dlBtn = document.getElementById('btnDownloadDEM');
+  if (dlBtn) { dlBtn.style.display = ''; dlBtn.disabled = false; btnProgressReset(dlBtn); }
   updateBuildBtn();
 }
 
@@ -1174,6 +1331,8 @@ function _resetCustomDem() {
   terrainCenter = null;
   demReady = false;
   terrainLocked = false;
+  customConfirmed = false;
+  customSizeChosen = false;
   document.getElementById('sel-info').innerHTML = '';
   document.getElementById('demStatus').innerText = '';
   var u = document.getElementById('btnUploadDEM');
@@ -1191,6 +1350,108 @@ function setStatus(msg, cls) {
   var el=document.getElementById('status');
   el.innerText=msg; el.className=cls||'';
 }
+
+// --- Step locking, button progress, drag-and-drop DEM upload ---
+var TERRAIN_LOCK_IDS = ['domainName','domainSize','windFrom','uref','zref','z0',
+                        'flatTerrain','customDem','customDemFile','btnUploadDEM',
+                        'customZoffset','zOffsetVal'];
+function setTerrainLockedUI(locked) {
+  TERRAIN_LOCK_IDS.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = locked;
+  });
+  try {
+    if (locked) { map.removeControl(drawCtl); }
+    else { map.addControl(drawCtl); }
+  } catch (err) {}
+}
+function setStructuresLockedUI(locked) {
+  structuresLocked = locked;
+  ['enableSingle','enableGrid'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.disabled = locked;
+  });
+  document.querySelectorAll('#singleOptions input, #singleOptions select, #singleOptions button, #gridOptions input, #gridOptions select, #gridOptions button').forEach(function(el) {
+    el.disabled = locked;
+  });
+  document.querySelectorAll('#struct-list .remove').forEach(function(el) {
+    el.style.display = locked ? 'none' : '';
+  });
+  document.querySelectorAll('.resetStructsBtn').forEach(function(el) {
+    el.style.display = locked ? 'block' : 'none';
+    el.disabled = false;
+  });
+}
+function btnProgressStart(btn, expectSec) {
+  if (!btn) return;
+  btnProgressStop(btn);
+  btn.classList.add('btn-progress');
+  btn._pT0 = Date.now();
+  btn._pBase = 2;
+  btn._pTau = Math.max(expectSec, 1) * 0.7;
+  btn.style.setProperty('--p', '2%');
+  btn._pTimer = setInterval(function() {
+    var t = (Date.now() - btn._pT0) / 1000.0;
+    var p = btn._pBase + (92 - btn._pBase) * (1 - Math.exp(-t / btn._pTau));
+    btn.style.setProperty('--p', p.toFixed(1) + '%');
+  }, 250);
+}
+// Jump the bar to a known milestone (a job progress message) and keep ramping
+// from there with a shorter time constant.
+function btnProgressFloor(btn, pct, tauSec) {
+  if (!btn || !btn._pTimer) return;
+  var t = (Date.now() - btn._pT0) / 1000.0;
+  var cur = btn._pBase + (92 - btn._pBase) * (1 - Math.exp(-t / btn._pTau));
+  if (pct <= cur) return;
+  btn._pBase = Math.min(pct, 90);
+  btn._pT0 = Date.now();
+  if (tauSec) btn._pTau = tauSec;
+  btn.style.setProperty('--p', btn._pBase.toFixed(1) + '%');
+}
+function btnProgressStop(btn) { if (btn && btn._pTimer) { clearInterval(btn._pTimer); btn._pTimer = null; } }
+function btnProgressDone(btn, ok) {
+  if (!btn) return;
+  btnProgressStop(btn);
+  btn.style.setProperty('--p', '100%');
+  setTimeout(function() {
+    btn.classList.remove('btn-progress');
+    btn.style.removeProperty('--p');
+    if (ok) { btn.classList.remove('btn-primary'); btn.classList.add('btn-success'); }
+  }, 350);
+}
+function btnProgressReset(btn) {
+  if (!btn) return;
+  btnProgressStop(btn);
+  btn.classList.remove('btn-progress');
+  btn.style.removeProperty('--p');
+  btn.classList.remove('btn-success');
+  btn.classList.add('btn-primary');
+}
+// Drag & drop a GeoTIFF anywhere on the page to start a custom-DEM upload.
+['dragover','drop'].forEach(function(evName) {
+  document.addEventListener(evName, function(ev) { ev.preventDefault(); });
+});
+document.addEventListener('drop', function(ev) {
+  var files = ev.dataTransfer && ev.dataTransfer.files;
+  if (!files || !files.length) return;
+  var f = files[0];
+  if (!/\.tiff?$/i.test(f.name)) { setStatus('Drop a GeoTIFF (.tif / .tiff) to import a custom DEM.', 'err'); return; }
+  if (terrainLocked && !(typeof customDemActive === 'function' && customDemActive())) {
+    setStatus('Terrain already confirmed — reset it before importing a DEM.', 'err'); return;
+  }
+  if (!document.getElementById('domainName').value.trim()) {
+    setStatus('Enter a domain name, then drop the file again.', 'err'); return;
+  }
+  var cd = document.getElementById('customDem');
+  if (cd && !cd.checked) { cd.checked = true; cd.dispatchEvent(new Event('change')); }
+  var input = document.getElementById('customDemFile');
+  try {
+    var dt = new DataTransfer();
+    dt.items.add(f);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+  } catch (err) { setStatus('Drag-and-drop not supported by this browser — use the file picker.', 'err'); return; }
+  uploadCustomDEM();
+});
 
 // --- Collapsible sidebar: desktop slide-away handle, phone off-canvas drawer ---
 function toggleSidebar() {

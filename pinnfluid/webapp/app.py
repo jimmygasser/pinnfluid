@@ -208,8 +208,9 @@ def _validate_compute_request(body: dict) -> None:
         domain_size = int(body.get("domain_size", 1000))
     except (TypeError, ValueError) as exc:
         raise ValueError("domain_size must be numeric") from exc
-    if domain_size not in {500, 1000, 2000, 3000}:
-        raise ValueError("domain_size must be one of 500, 1000, 2000 or 3000 m")
+    max_dom = _env_nonnegative_int("PINN_WEBAPP_MAX_DOMAIN_M", 3000)
+    if not 200 <= domain_size <= max_dom:
+        raise ValueError(f"domain_size must be between 200 and {max_dom} m")
     bounded("wind_from", 270.0, 0.0, 360.0)
     bounded("uref", 10.0, 1.0, 30.0)
     bounded("zref", 20.0, 5.0, 100.0)
@@ -409,7 +410,14 @@ def _build_html() -> str:
     )
 
     # Step 1: rename the DEM button.
-    html = html.replace("Download DEM tiles", "Confirm terrain", 1)
+    html = html.replace("Download DEM tiles", "Confirm terrain &amp; wind", 1)
+
+    # Web app: hide the custom-height-above-terrain control (auto default is
+    # right for everyone; the hidden checkbox keeps _collectBody() working).
+    html = html.replace('<input type="checkbox" id="customZoffset"/>',
+                        '<input type="checkbox" id="customZoffset" style="display:none;"/>', 1)
+    html = html.replace('<label for="customZoffset">Custom total height above terrain</label>', '', 1)
+    html = html.replace('<div id="zOffsetDefault" class="help" style="margin:-4px 0 8px 0;">Auto: 200-500m based on domain size</div>', '', 1)
 
     # Step 2a: Confirm button inside the Single-structures section. The help
     # line after the flattenGround checkbox is a unique anchor for that section.
@@ -417,7 +425,9 @@ def _build_html() -> str:
     html = html.replace(
         '<div class="help">Levels terrain at structure footprint (+2m margin).</div>',
         '<div class="help">Levels terrain at structure footprint (+2m margin).</div>\n'
-        '      <button class="btn btn-primary" id="btnConfirmSingle" onclick="confirmStructures()" style="margin-top:10px;">Confirm structure(s)</button>',
+        '      <div class="help" style="color:#B26500;"><b>Place the structure(s) by clicking inside the domain</b> before confirming.</div>\n'
+        '      <button class="btn btn-primary" id="btnConfirmSingle" onclick="confirmStructures()" style="margin-top:10px;">Confirm structure(s)</button>\n'
+        '      <button class="btn btn-secondary resetStructsBtn" onclick="resetStructures()" style="display:none; margin-top:4px;">Reset structures</button>',
         1,
     )
 
@@ -427,7 +437,9 @@ def _build_html() -> str:
         '<label for="flattenGrid">Flatten ground under entire grid</label>\n      </div>',
         '<label for="flattenGrid">Flatten ground under entire grid</label>\n'
         '      </div>\n'
-        '      <button class="btn btn-primary" id="btnConfirmGrid" onclick="confirmStructures()" style="margin-top:10px;">Confirm structure(s)</button>',
+        '      <div class="help" style="color:#B26500;"><b>Click inside the domain to position the grid</b> before confirming.</div>\n'
+        '      <button class="btn btn-primary" id="btnConfirmGrid" onclick="confirmStructures()" style="margin-top:10px;">Confirm structure(s)</button>\n'
+        '      <button class="btn btn-secondary resetStructsBtn" onclick="resetStructures()" style="display:none; margin-top:4px;">Reset structures</button>',
         1,
     )
 
@@ -956,7 +968,19 @@ function toggleValues() {
 
 function _collectBody() {
   var name = document.getElementById('domainName').value.trim();
-  var domSize = parseInt(document.getElementById('domainSize').value);
+  var domSize = Math.round((typeof effDomainSize === 'function')
+    ? effDomainSize() : parseFloat(document.getElementById('domainSize').value));
+  var customCenterCrs = null;
+  if (typeof customDemActive === 'function' && customDemActive()) {
+    // Largest rotated square that fits in the uploaded DEM for this wind
+    // direction — same formula as the orange preview square (customEffSize),
+    // so the server crops exactly what the user sees.
+    domSize = Math.round(customEffSize());
+    if (terrainCenter) {
+      var ccc = _latlngToCrs(terrainCenter.lat, terrainCenter.lng);
+      if (ccc) customCenterCrs = {x: ccc[0], y: ccc[1]};
+    }
+  }
   var windFrom = parseInt(document.getElementById('windFrom').value);
   var flat = document.getElementById('flatTerrain').checked;
   var structData = structures.map(function(s) {
@@ -973,6 +997,7 @@ function _collectBody() {
   return {
     domain_name: name,
     domain_size: domSize,
+    custom_center_crs: customCenterCrs,
     wind_from: windFrom,
     flat_terrain: flat,
     structures: structData,
@@ -1009,6 +1034,7 @@ function _inputsSignature(body) {
     flat_terrain: body.flat_terrain,
     structures: body.structures,
     center: body.center,
+    custom_center_crs: body.custom_center_crs,
     uref: body.uref,
     zref: body.zref,
     z0: body.z0,
@@ -1044,8 +1070,21 @@ function _setConfirmBtnsState(state) {
 function confirmStructures() {
   var body = _collectBody();
   if (!body.domain_name) { setStatus('Enter a domain name','err'); return; }
+  var singleOn = document.getElementById('enableSingle').checked;
+  var gridOn = document.getElementById('enableGrid').checked;
+  if (!singleOn && !gridOn) {
+    setStatus('Tick "Single structures" or "Structure grid" first — or predict directly for terrain only.','err'); return;
+  }
+  if (singleOn && structures.length === 0) {
+    setStatus('Select the structure location by clicking in the domain before confirming.','err'); return;
+  }
+  if (gridOn && !gridCenter) {
+    setStatus('Select the grid position by clicking in the domain before confirming.','err'); return;
+  }
+  var actBtn = document.getElementById(singleOn ? 'btnConfirmSingle' : 'btnConfirmGrid');
   setStatus('Confirming structure(s) — building STLs and model inputs…','busy');
   _setConfirmBtnsDisabled(true);
+  btnProgressStart(actBtn, 25);
   document.getElementById('btnBuild').disabled = true;
   fetch('/build_inputs', {
     method:'POST',
@@ -1057,12 +1096,15 @@ function confirmStructures() {
       lastInputsDomain = body.domain_name;
       lastInputsSignature = _inputsSignature(body);
       document.getElementById('btnBuild').disabled = false;
+      btnProgressDone(actBtn, true);
       _setConfirmBtnsState('ready');   // confirm button → green
+      setStructuresLockedUI(true);
       var gs = (d.grid_shape || []).join(' × ');
-      setStatus('Structures confirmed. Inputs ready ('+gs+'). Now click Predict.','ok');
+      setStatus('Structures confirmed and locked ('+gs+'). Use "Reset structures" to change them. Now click Predict.','ok');
     } else {
       lastInputsDomain = null;
       lastInputsSignature = null;
+      btnProgressReset(actBtn);
       _setConfirmBtnsState('pending');
       setStatus('Build-inputs error: ' + d.error, 'err');
     }
@@ -1070,9 +1112,26 @@ function confirmStructures() {
     _setConfirmBtnsDisabled(false);
     lastInputsDomain = null;
     lastInputsSignature = null;
+    btnProgressReset(actBtn);
     _setConfirmBtnsState('pending');
     setStatus('Build-inputs error: '+e, 'err');
   });
+}
+
+function resetStructures() {
+  structures = [];
+  structMarkers.clearLayers();
+  renderStructList();
+  gridCenter = null;
+  gridPreviewGroup.clearLayers();
+  var gi = document.getElementById('grid-info'); if (gi) gi.innerHTML = '';
+  lastInputsDomain = null;
+  lastInputsSignature = null;
+  setStructuresLockedUI(false);
+  _getConfirmBtns().forEach(function(b){ btnProgressReset(b); b.disabled = false; });
+  _setConfirmBtnsState('pending');
+  updateBuildBtn();
+  setStatus('Structures reset — place them again, then confirm. Terrain stays unchanged.', 'ok');
 }
 
 // Step 3: Predict. If structures are ticked and inputs aren't built yet,
@@ -1088,7 +1147,22 @@ function _pollJob(jobId, onDone) {
   var timer = setInterval(function() {
     fetch('/job_status?id=' + encodeURIComponent(jobId)).then(r=>r.json()).then(function(j) {
       if (j.state === 'queued' || j.state === 'running') {
-        setStatus(j.message || 'working…', 'busy');
+        var msg = j.message || '';
+        setStatus(msg || 'working…', 'busy');
+        var pBtn = document.getElementById('btnBuild');
+        var frac = msg.match(/\((\d+)\s*\/\s*(\d+)\)/);  // rose: "direction d° (i/n): …"
+        if (frac) {
+          var done = parseInt(frac[1]) - 1, tot = Math.max(parseInt(frac[2]), 1);
+          btnProgressFloor(pBtn, 4 + 88 * done / tot, 40);
+        } else if (msg.indexOf('uncertainty') >= 0) {
+          btnProgressFloor(pBtn, 85, 15);
+        } else if (msg.indexOf('generating plots') >= 0) {
+          btnProgressFloor(pBtn, 75, 8);
+        } else if (msg.indexOf('running') >= 0) {
+          btnProgressFloor(pBtn, 30, 20);
+        } else if (msg.indexOf('building model inputs') >= 0) {
+          btnProgressFloor(pBtn, 12, 20);
+        }
         return;
       }
       clearInterval(timer);
@@ -1096,11 +1170,13 @@ function _pollJob(jobId, onDone) {
       if (j.state === 'done' && j.result && j.result.success) {
         onDone(j.result);
       } else {
+        btnProgressReset(document.getElementById('btnBuild'));
         setStatus('Error: ' + (j.error || (j.result && j.result.error) || 'unknown'), 'err');
       }
     }).catch(function(e) {
       clearInterval(timer);
       document.getElementById('btnBuild').disabled = false;
+      btnProgressReset(document.getElementById('btnBuild'));
       setStatus('Error: ' + e, 'err');
     });
   }, 1500);
@@ -1189,6 +1265,24 @@ function runPredict() {
     var customDirs = (document.getElementById('roseDirs') || {value:''}).value.trim();
     if (customDirs) { body.rose_directions = customDirs; }
   }
+  if (roseOn && typeof customDemActive === 'function' && customDemActive()) {
+    // A rose sweeps all directions: the square must fit at the worst angle
+    // (45°, factor √2) at the chosen centre — otherwise sectors would crop
+    // outside the uploaded DEM.
+    var usableAll = Math.floor(Math.min(customDem.w_m, customDem.h_m) / Math.SQRT2);
+    if (body.domain_size > usableAll) {
+      setStatus('A wind rose sweeps all directions, so the domain square must fit at every angle: max ' + usableAll + ' m for this DEM. Reduce the domain size (or upload a larger DEM).', 'err');
+      return;
+    }
+    var hbR = body.domain_size * Math.SQRT2 / 2 + 2.0;
+    var obR = customDem.overlayBounds;
+    var cosR = Math.cos(terrainCenter.lat * Math.PI / 180);
+    if (terrainCenter.lat - hbR / 111320.0 < obR.getSouth() || terrainCenter.lat + hbR / 111320.0 > obR.getNorth()
+     || terrainCenter.lng - hbR / (111320.0 * cosR) < obR.getWest() || terrainCenter.lng + hbR / (111320.0 * cosR) > obR.getEast()) {
+      setStatus('For a wind rose the domain square must fit at every angle — move it toward the DEM centre (or reduce the domain size).', 'err');
+      return;
+    }
+  }
   if (!body.domain_name) { setStatus('Enter a domain name','err'); return; }
   var singleOn = document.getElementById('enableSingle').checked;
   var gridOn   = document.getElementById('enableGrid').checked;
@@ -1204,6 +1298,7 @@ function runPredict() {
   }
 
   document.getElementById('btnBuild').disabled = true;
+  btnProgressStart(document.getElementById('btnBuild'), roseOn ? 420 : 120);
   var endpoint = roseOn ? '/predict_rose' : '/predict';
   setStatus(roseOn ? 'Starting wind-rose sweep…' : 'Starting prediction…', 'busy');
   fetch(endpoint, {
@@ -1213,16 +1308,19 @@ function runPredict() {
   }).then(r=>r.json()).then(function(d) {
     if (!d.job_id) {
       document.getElementById('btnBuild').disabled = false;
+      btnProgressReset(document.getElementById('btnBuild'));
       setStatus('Error: ' + (d.error || 'no job id'), 'err');
       return;
     }
     _pollJob(d.job_id, function(result) {
       lastPredictDomain = body.domain_name;
+      btnProgressDone(document.getElementById('btnBuild'), true);
       setStatus('Done (' + (result.elapsed_s||0).toFixed(1) + ' s).', 'ok');
       if (roseOn) { renderRose(result); } else { renderReport(result); }
     });
   }).catch(function(e) {
     document.getElementById('btnBuild').disabled = false;
+    btnProgressReset(document.getElementById('btnBuild'));
     setStatus('Error: '+e, 'err');
   });
 }
@@ -1353,6 +1451,7 @@ def _coerce_body_for_build(body: dict) -> dict:
         flatten_ground=bool(body.get("flatten_ground", True)),
         grid=body.get("grid"),
         z_top_offset=body.get("z_top_offset"),
+        custom_center_crs=body.get("custom_center_crs"),
     )
 
 
@@ -1368,17 +1467,47 @@ def _body_signature(body: dict) -> str:
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
+def _apply_custom_center(name: str, center: dict) -> None:
+    """Reposition the crop pivot of an uploaded custom DEM.
+
+    The user can drag the domain square inside the DEM before confirming; the
+    chosen centre arrives in DEM-CRS coords and replaces the centroid that
+    register_custom_dem stored in selection.json (build_domain reads the crop
+    pivot from there). Swiss-tile selections are never touched.
+    """
+    try:
+        cx = float(center.get("x"))
+        cy = float(center.get("y"))
+    except (TypeError, ValueError, AttributeError):
+        return
+    sel_path = _case_paths(name)["dem_dir"] / "selection.json"
+    if not sel_path.exists():
+        return
+    sel = json.loads(sel_path.read_text())
+    if not sel.get("custom_dem"):
+        return
+    b = sel.get("bounds_crs")
+    if b:
+        cx = min(max(cx, float(b[0])), float(b[2]))
+        cy = min(max(cy, float(b[1])), float(b[3]))
+    sel["center_lv95"] = {"E": round(cx, 3), "N": round(cy, 3)}
+    sel_path.write_text(json.dumps(sel, indent=2))
+
+
 def _run_build_inputs(body: dict) -> dict:
     t0 = time.time()
     kw = _coerce_body_for_build(body)
     name = _safe_name(kw["domain_name"])
     kw["domain_name"] = name
+    custom_center = kw.pop("custom_center_crs", None)
     # Fresh workspace for this domain — but keep the DEM that Confirm terrain
     # just downloaded into dem/<name>/; build_domain needs dem_cropped.tif.
     try:
         cleanup_case(name, keep_dem=True)
     except Exception:
         pass
+    if custom_center:
+        _apply_custom_center(name, custom_center)
     inputs = build_inputs(**kw)
     # Record what these inputs were built from (see _body_signature).
     try:
