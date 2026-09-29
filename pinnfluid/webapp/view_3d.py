@@ -221,7 +221,85 @@ def _snow_surface_trace(x, y, z_ds, speed_ds, *, lighting, lightposition, visibl
 # ---------------------------------------------------------------------------
 # Trace builders
 # ---------------------------------------------------------------------------
-def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
+_SAT_MAX_SIDE = 260          # vertices per side of the textured terrain mesh (~5 MB of HTML)
+_SAT_TARGET_SPACING_M = 2.5  # aim for ~photo resolution; the 30 m terrain grid is too coarse
+
+
+def _satellite_mesh_trace(x, y, elev_yx, z_offset_applied, satellite, transform_meta, *, visible=True):
+    """Terrain as a Mesh3d textured with the SWISSIMAGE aerial photo.
+
+    Mesh3d rather than Surface: `vertexcolor` takes true RGB per vertex, so the
+    photo is interpolated correctly across each triangle, whereas Surface only
+    maps a scalar through a colorscale. The mesh is built on a finer grid than
+    the 30 m terrain raster (bilinear elevation interpolation) so the photo is
+    not reduced to a mosaic of 30 m tiles; the colour-mapped Surface traces and
+    this mesh are toggled, never shown together, so they need not share vertices.
+    Returns None whenever the texture cannot be built (no imagery, bad meta).
+    """
+    if satellite is None or not transform_meta:
+        return None
+    import plotly.graph_objects as go
+    from scipy.interpolate import RegularGridInterpolator
+    x = np.asarray(x, dtype=np.float64); y = np.asarray(y, dtype=np.float64)
+    elev = np.asarray(elev_yx, dtype=np.float64)
+    if elev.ndim != 2 or elev.shape != (y.size, x.size) or x.size < 2 or y.size < 2:
+        return None
+    elev = np.where(np.isfinite(elev), elev, np.nanmean(elev))
+    ext_x = float(x[-1] - x[0]); ext_y = float(y[-1] - y[0])
+    nx = int(min(_SAT_MAX_SIDE, max(x.size, round(ext_x / _SAT_TARGET_SPACING_M) + 1)))
+    ny = int(min(_SAT_MAX_SIDE, max(y.size, round(ext_y / _SAT_TARGET_SPACING_M) + 1)))
+    xf = np.linspace(x[0], x[-1], nx); yf = np.linspace(y[0], y[-1], ny)
+    try:
+        interp = RegularGridInterpolator((y, x), elev, bounds_error=False, fill_value=None)
+        Xf, Yf = np.meshgrid(xf, yf)
+        zf = interp(np.stack([Yf.ravel(), Xf.ravel()], axis=1)).reshape(ny, nx)
+        rgb = satellite.terrain_vertex_rgb(xf, yf, transform_meta)   # (ny, nx, 3) uint8
+    except Exception:
+        return None
+    idx = np.arange(ny * nx).reshape(ny, nx)
+    a = idx[:-1, :-1].ravel(); b = idx[:-1, 1:].ravel()
+    c = idx[1:, :-1].ravel();  d = idx[1:, 1:].ravel()
+    # Compact encoding: rounded coordinates and a numeric per-vertex elevation
+    # for the tooltip (hovertemplate) instead of 100k preformatted strings.
+    elev_real = np.round(zf.ravel() - float(z_offset_applied), 1)
+    return go.Mesh3d(
+        x=np.round(Xf.ravel(), 1), y=np.round(Yf.ravel(), 1), z=np.round(zf.ravel(), 2),
+        i=np.concatenate([a, b]), j=np.concatenate([b, d]), k=np.concatenate([c, c]),
+        vertexcolor=[f'#{r:02x}{g:02x}{bb:02x}' for r, g, bb in rgb.reshape(-1, 3).tolist()],
+        customdata=elev_real,
+        hovertemplate='Terrain elevation: %{customdata:.1f} m<extra></extra>',
+        flatshading=False,
+        # Bright, mostly ambient lighting: the photo already carries its own
+        # shading, strong diffuse/specular terms would darken and wash it out.
+        lighting=dict(ambient=0.92, diffuse=0.35, specular=0.02, roughness=0.9, fresnel=0.05),
+        lightposition=dict(x=50_000, y=50_000, z=100_000),
+        name='Terrain (satellite)',
+        legendgroup='terrain', showlegend=False,
+        visible=visible,
+    )
+
+
+def _ground_buttons(labels, terrain_idx):
+    """Restyle buttons for the ground colour modes.
+
+    `terrain_idx` lists the terrain traces in `labels` order, plus one trailing
+    satellite trace when the aerial photo is available; that mode is then
+    listed first and is the default. Returns (buttons, active, sat_button),
+    sat_button being None when there is no satellite trace.
+    """
+    n = len(terrain_idx)
+    has_sat = n > len(labels)
+    order = ([('satellite', n - 1)] if has_sat else []) + [(lbl, i) for i, lbl in enumerate(labels)]
+    buttons = []
+    for lbl, on in order:
+        vis = [False] * n
+        vis[on] = True
+        buttons.append(dict(label=lbl, method='restyle', args=[{'visible': vis}, terrain_idx]))
+    return buttons, 0, (0 if has_sat else None)
+
+
+def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0,
+                    satellite=None, transform_meta=None):
     """Three Surface traces: coloured by elevation (default), relative pressure,
     or the heuristic snow drift indicator.
 
@@ -297,7 +375,16 @@ def _terrain_traces(bundle, pred_flow, *, z_offset_applied: float = 0.0):
         x, y, elev_ds, speed_ground_ds,
         lighting=common_lighting, lightposition=common_lightpos, visible=False,
     )
-    return [elev_trace, pressure_trace, snow_trace]
+    out = [elev_trace, pressure_trace, snow_trace]
+    # Aerial photo texture (swisstopo SWISSIMAGE) as the default ground when
+    # the run is georeferenced in LV95 and the image could be fetched.
+    sat_trace = _satellite_mesh_trace(
+        np.asarray(bundle.x_coords, dtype=np.float32), np.asarray(bundle.y_coords, dtype=np.float32),
+        elev_raw, z_offset_applied, satellite, transform_meta)
+    if sat_trace is not None:
+        elev_trace.visible = False
+        out.append(sat_trace)
+    return out
 
 
 def _per_structure_base_shift(verts: np.ndarray, structure_bounds: list, bundle) -> np.ndarray:
@@ -372,13 +459,47 @@ def _structure_traces(structure_stl_path: Optional[Path], *,
         return [go.Mesh3d(
             x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
             i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-            color='#6a1b9a', opacity=1.0, flatshading=True,
-            lighting=dict(ambient=0.45, diffuse=0.85, specular=0.25, roughness=0.5),
+            facecolor=_structure_face_colors(mesh),
+            opacity=1.0, flatshading=True,
+            # Glossy: module glass and aluminium frames catch the light.
+            lighting=dict(ambient=0.5, diffuse=0.7, specular=0.55, roughness=0.35, fresnel=0.15),
+            lightposition=dict(x=50_000, y=-50_000, z=100_000),
             name='Structures', legendgroup='structures', showlegend=False,
-            hovertemplate='Structure surface<extra></extra>',
+            hovertemplate='PV structure<extra></extra>',
         )]
     except Exception:
         return []
+
+
+_STRUCT_GLASS = '#1c2a44'   # dark blue-black PV module glass
+_STRUCT_FRAME = '#a9adb3'   # aluminium frame / legs
+_STRUCT_AREA_FRAC = 0.25    # faces >= this fraction of the largest face are module surfaces
+
+
+def _structure_face_colors(mesh=None, *, verts=None, faces=None) -> list:
+    """Two-tone PV look from geometry alone: the module surfaces are the few
+    large faces of each structure (front/back of a plate, top/bottom of a
+    table), legs and frame edges are the many small ones. Orientation would
+    not work: helioplants are vertical plates, tables are tilted. Falls back
+    to uniform dark glass when the split is degenerate. Accepts a trimesh
+    mesh or raw (verts, faces) arrays."""
+    try:
+        if mesh is not None:
+            area = np.asarray(mesh.area_faces, dtype=np.float64)
+        else:
+            v = np.asarray(verts, dtype=np.float64); f = np.asarray(faces, dtype=np.int64)
+            area = 0.5 * np.linalg.norm(np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]]), axis=1)
+        n = int(area.size)
+        if n == 0:
+            return []
+        glass = area >= _STRUCT_AREA_FRAC * float(area.max())
+        # Degenerate split (everything or nothing is "large"): uniform look.
+        if glass.all() or not glass.any():
+            return [_STRUCT_GLASS] * n
+        return [_STRUCT_GLASS if g else _STRUCT_FRAME for g in glass.tolist()]
+    except Exception:
+        n = len(getattr(mesh, 'faces', [])) if mesh is not None else len(faces or [])
+        return [_STRUCT_GLASS] * int(n)
 
 
 def _make_cone_trace(bundle, pred_flow, n_glyphs, *, name, visible, umag_max, sizeref):
@@ -727,7 +848,7 @@ def _legend_handle(group: str, label: str, color: str):
 # Figure assembly
 # ---------------------------------------------------------------------------
 def build_3d_figure(saved_inputs: dict, *, domain_name: str,
-                    structure_stl_path: Optional[Path] = None):
+                    structure_stl_path: Optional[Path] = None, satellite=None):
     import plotly.graph_objects as go
     bundle = saved_inputs['bundle']
     pred_flow = saved_inputs['pred_flow']
@@ -774,7 +895,8 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
 
     # --- Terrain (elevation, relative pressure and snow traces) ---
     z_offset_applied = float(((saved_inputs.get('transform_meta') or {}).get('z_offset_applied')) or 0.0)
-    terrain = _terrain_traces(bundle, pred_flow, z_offset_applied=z_offset_applied)
+    terrain = _terrain_traces(bundle, pred_flow, z_offset_applied=z_offset_applied,
+                              satellite=satellite, transform_meta=saved_inputs.get('transform_meta'))
     terrain_idx = list(range(len(traces), len(traces) + len(terrain)))
     traces.extend(terrain)
 
@@ -934,20 +1056,10 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
     ]
 
     # ----- Updatemenu (terrain colour mode toggle) -----
-    terrain_buttons = [
-        dict(
-            label='elevation', method='restyle',
-            args=[{'visible': [True, False, False]}, terrain_idx],
-        ),
-        dict(
-            label='relative pressure', method='restyle',
-            args=[{'visible': [False, True, False]}, terrain_idx],
-        ),
-        dict(
-            label='snow drift', method='restyle',
-            args=[{'visible': [False, False, True]}, terrain_idx],
-        ),
-    ]
+    terrain_buttons, ground_active, ground_sat_btn = _ground_buttons(
+        ['elevation', 'relative pressure', 'snow drift'], terrain_idx)
+    ground_meta = {'terrain_idx': [int(i) for i in terrain_idx],
+                   'active': int(ground_active), 'sat_button': ground_sat_btn}
     # Streamline direction buttons use method='skip'; visibility is updated
     # by the JS hook based on the combined (height, count, direction) state.
     direction_buttons = [
@@ -962,8 +1074,9 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
             type='buttons', direction='down',
             buttons=terrain_buttons,
             x=0.01, y=0.94, xanchor='left', yanchor='top',
-            showactive=True, active=0,
+            showactive=True, active=ground_active,
             bgcolor='#f0f0f0', bordercolor='#888',
+            name='ground_mode',
         ),
         # Streamline direction (fwd/bwd/both) — tight above the streamline
         # count slider it belongs to; the 'Streamlines:' annotation sits on top.
@@ -1054,6 +1167,7 @@ def build_3d_figure(saved_inputs: dict, *, domain_name: str,
 
     # Pack metadata that the JS hook needs.
     meta_for_js = {
+        'ground': ground_meta,
         'stream_indices': [int(s) for s in trace_groups['streams']],
         'stream_index_grid_fwd': [None if i is None else int(i) for i in stream_index_grid_fwd],
         'stream_index_grid_bwd': [None if i is None else int(i) for i in stream_index_grid_bwd],
@@ -1087,6 +1201,7 @@ def _streamline_js_hook(meta: dict) -> str:
         'h_idx': meta['default_h_idx'],
         'c_idx': meta['default_c_idx'],
         'dir': meta.get('default_direction', 'forward'),
+        'ground': meta.get('ground'),
     })
     return r"""
 <script>
@@ -1100,6 +1215,15 @@ def _streamline_js_hook(meta: dict) -> str:
     var curH = STATE.h_idx;
     var curC = STATE.c_idx;
     var curDir = STATE.dir || 'forward';
+    // Ground colour mode: clicking the already-active mode returns to the
+    // satellite photo (when the run has one).
+    var G = STATE.ground || null;
+    var groundActive = G ? G.active : null;
+    function groundMenuIndex() {
+      var menus = (gd._fullLayout && gd._fullLayout.updatemenus) || [];
+      for (var m = 0; m < menus.length; m++) { if (menus[m].name === 'ground_mode') return m; }
+      return -1;
+    }
 
     function targetsForCurrent() {
       // curC is the slider index; 0 means hidden, real counts start at 1.
@@ -1159,6 +1283,21 @@ def _streamline_js_hook(meta: dict) -> str:
     gd.on('plotly_buttonclicked', function(e) {
       try {
         var label = (e && e.button && e.button.label) || '';
+        var menuName = (e && e.menu && e.menu.name) || '';
+        if (G && menuName === 'ground_mode') {
+          var idx = (typeof e.active === 'number') ? e.active : groundActive;
+          if (G.sat_button !== null && idx === groundActive && idx !== G.sat_button) {
+            var vis = new Array(G.terrain_idx.length).fill(false);
+            vis[G.terrain_idx.length - 1] = true;   // satellite = trailing terrain trace
+            Plotly.restyle(gd, {visible: vis}, G.terrain_idx);
+            var mi = groundMenuIndex();
+            if (mi >= 0) { var upd = {}; upd['updatemenus[' + mi + '].active'] = G.sat_button; Plotly.relayout(gd, upd); }
+            groundActive = G.sat_button;
+          } else {
+            groundActive = idx;
+          }
+          return;
+        }
         if (label.indexOf('forward') >= 0) { curDir = 'forward'; applyVisibility(); }
         else if (label.indexOf('backward') >= 0) { curDir = 'backward'; applyVisibility(); }
         else if (label.indexOf('both') >= 0) { curDir = 'both'; applyVisibility(); }
@@ -1176,11 +1315,11 @@ def _streamline_js_hook(meta: dict) -> str:
 
 
 def write_3d_html(out_path: Path, *, saved_inputs: dict, domain_name: str,
-                   structure_stl_path: Optional[Path] = None) -> Path:
+                   structure_stl_path: Optional[Path] = None, satellite=None) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, meta = build_3d_figure(saved_inputs, domain_name=domain_name,
-                                structure_stl_path=structure_stl_path)
+                                structure_stl_path=structure_stl_path, satellite=satellite)
     html = fig.to_html(
         include_plotlyjs='/static/plotly.min.js', full_html=True,  # served same-origin by app.py: offline + CSP safe
         config={'displayModeBar': True, 'scrollZoom': True},
@@ -1405,7 +1544,7 @@ def _wake_seed_positions(structure_bounds: list, x_grid, y_grid, z_grid,
 
 def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
                                structure_stl_path: Optional[Path] = None,
-                               roi_label: Optional[str] = None):
+                               roi_label: Optional[str] = None, satellite=None):
     import plotly.graph_objects as go
     focus_bundle, focus_pred = _pick_structure_focus_bundle_for_roi(saved_inputs, roi_label)
 
@@ -1515,27 +1654,37 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
         lighting=common_lighting, lightposition=common_lightpos, visible=False,
     ))
     terrain_idx = [0, 1, 2]
+    if callable(satellite):   # provider: (x_coords, y_coords, tag) -> SatelliteImage | None
+        satellite = satellite(focus_bundle.x_coords, focus_bundle.y_coords,
+                              f"roi_{roi_label or 'default'}")
+    sat_trace = _satellite_mesh_trace(
+        np.asarray(focus_bundle.x_coords, dtype=np.float32),
+        np.asarray(focus_bundle.y_coords, dtype=np.float32),
+        elev_raw, z_off_struct, satellite, saved_inputs.get('transform_meta'))
+    if sat_trace is not None:
+        terrain_p_trace.visible = False
+        terrain_idx.append(len(traces))
+        traces.append(sat_trace)
+    struct_ground_buttons, struct_ground_active, struct_sat_btn = _ground_buttons(
+        ['relative pressure', 'elevation', 'snow drift'], terrain_idx)
+    ground_meta = {'terrain_idx': [int(i) for i in terrain_idx],
+                   'active': int(struct_ground_active), 'sat_button': struct_sat_btn}
 
-    # --- Structure mesh: same colour scale, no separate colorbar ---
+    # --- Structure mesh: realistic two-tone PV material (the pressure numbers
+    #     live in the PDF report); the surface pressure stays on hover. ---
     if struct_data is not None:
         traces.append(go.Mesh3d(
             x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
             i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-            intensity=p_vert,
-            intensitymode='vertex',
-            colorscale='RdBu_r',
-            cmin=-p_lim, cmax=p_lim,
-            showscale=False,
+            facecolor=_structure_face_colors(verts=verts, faces=faces),
             opacity=1.0,
-            flatshading=False,
-            lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2, roughness=0.6),
-            name='Structure (relative pressure)',
+            flatshading=True,
+            lighting=dict(ambient=0.5, diffuse=0.7, specular=0.55, roughness=0.35, fresnel=0.15),
+            lightposition=dict(x=50_000, y=-50_000, z=100_000),
+            name='Structure',
             legendgroup='structures', showlegend=False,
-            text=_surface_hover_text(
-                p_vert,
-                formatter=lambda p: f'Structure relative p = {p:+.2f} Pa',
-            ),
-            hoverinfo='text',
+            customdata=np.round(np.asarray(p_vert, dtype=np.float64), 2),
+            hovertemplate='PV structure - relative p = %{customdata:+.2f} Pa<extra></extra>',
         ))
     else:
         traces.extend(_structure_traces(structure_stl_path))
@@ -1885,17 +2034,11 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
             # as the global view.
             dict(
                 type='buttons', direction='down',
-                buttons=[
-                    dict(label='relative pressure', method='restyle',
-                         args=[{'visible': [True, False, False]}, terrain_idx]),
-                    dict(label='elevation', method='restyle',
-                         args=[{'visible': [False, True, False]}, terrain_idx]),
-                    dict(label='snow drift', method='restyle',
-                         args=[{'visible': [False, False, True]}, terrain_idx]),
-                ],
+                buttons=struct_ground_buttons,
                 x=0.01, y=0.94, xanchor='left', yanchor='top',
-                showactive=True, active=0,
+                showactive=True, active=struct_ground_active,
                 bgcolor='#f0f0f0', bordercolor='#888',
+                name='ground_mode',
             ),
             # Streamline direction — tight above the count slider, same
             # placement as the global view.
@@ -1940,6 +2083,7 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
     )
 
     meta_for_js = {
+        'ground': ground_meta,
         'stream_indices': [int(s) for s in trace_groups['streams']],
         'stream_index_grid_fwd': [None if i is None else int(i) for i in stream_index_grid_fwd],
         'stream_index_grid_bwd': [None if i is None else int(i) for i in stream_index_grid_bwd],
@@ -1956,12 +2100,12 @@ def build_structure_3d_figure(saved_inputs: dict, *, domain_name: str,
 
 def write_structure_3d_html(out_path: Path, *, saved_inputs: dict, domain_name: str,
                              structure_stl_path: Optional[Path] = None,
-                             roi_label: Optional[str] = None) -> Path:
+                             roi_label: Optional[str] = None, satellite=None) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, meta = build_structure_3d_figure(
         saved_inputs, domain_name=domain_name,
-        structure_stl_path=structure_stl_path, roi_label=roi_label,
+        structure_stl_path=structure_stl_path, roi_label=roi_label, satellite=satellite,
     )
     html = fig.to_html(
         include_plotlyjs='/static/plotly.min.js', full_html=True,  # served same-origin by app.py: offline + CSP safe

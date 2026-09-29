@@ -355,6 +355,59 @@ def _job_start(jid: str, fn: Callable[[Callable[[str], None]], dict]) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+# Bump whenever view_3d.py / interactive_map.py change what the cached HTML
+# contains, so runs predicted before the change are re-rendered on next open.
+_VIEW_HTML_VERSION = 2
+
+
+def _refresh_view_cache(name: str) -> None:
+    """Drop cached view HTML that was produced by an older renderer version."""
+    base = RESULTS_DIR / name
+    marker = base / "view_html_version"
+    try:
+        current = int(marker.read_text().strip()) if marker.exists() else 0
+    except (OSError, ValueError):
+        current = 0
+    if current >= _VIEW_HTML_VERSION:
+        return
+    _invalidate_3d_cache(name)
+    try:
+        marker.write_text(str(_VIEW_HTML_VERSION))
+    except OSError:
+        pass
+
+
+def _satellite_for(name: str, saved: dict):
+    """Cached SWISSIMAGE texture for a run (None outside Switzerland / offline)."""
+    try:
+        from satellite import get_satellite_for_run  # type: ignore
+        bundle = saved["bundle"]
+        return get_satellite_for_run(
+            RESULTS_DIR / name, saved.get("transform_meta"),
+            bundle.x_coords, bundle.y_coords,
+            log=lambda msg: print(f"[{name}] {msg}", flush=True),
+        )
+    except Exception as exc:  # never let the texture break a view
+        print(f"[{name}] satellite: skipped ({exc})", flush=True)
+        return None
+
+
+def _satellite_provider_for(name: str, saved: dict, *, m_per_px: float):
+    """Provider used by the structure view: sharper image for the chosen ROI extent."""
+    def _provide(x_coords, y_coords, tag: str):
+        try:
+            from satellite import get_satellite_for_run  # type: ignore
+            return get_satellite_for_run(
+                RESULTS_DIR / name, saved.get("transform_meta"), x_coords, y_coords,
+                tag=tag, m_per_px=m_per_px,
+                log=lambda msg: print(f"[{name}] {msg}", flush=True),
+            )
+        except Exception as exc:
+            print(f"[{name}] satellite/{tag}: skipped ({exc})", flush=True)
+            return None
+    return _provide
+
+
 def _invalidate_3d_cache(name: str) -> None:
     """Drop cached 3D viewer HTML so a re-predict never serves stale views."""
     base = RESULTS_DIR / name
@@ -2396,6 +2449,7 @@ def _read_pdf_bytes(name: str) -> bytes:
 def _ensure_map_html(name: str) -> Path:
     """Generate the interactive 2D wind/pressure map on demand (cached on disk)."""
     out_path = RESULTS_DIR / name / "map.html"
+    _refresh_view_cache(name)
     if out_path.exists():
         return out_path
     if not has_saved_inputs(RESULTS_DIR, name):
@@ -2412,6 +2466,8 @@ def _ensure_map_html(name: str) -> Path:
         domain_name=name,
         pred_flow=display["pred_flow"],
         roi_pred_flows=display.get("roi_preds"),
+        transform_meta=saved.get("transform_meta"),
+        satellite=_satellite_for(name, saved),
     )
     return out_path
 
@@ -2419,6 +2475,7 @@ def _ensure_map_html(name: str) -> Path:
 def _ensure_3d_html(name: str) -> Path:
     """Generate the standalone 3D Plotly HTML on demand (cached on disk)."""
     out_path = RESULTS_DIR / name / "view_3d.html"
+    _refresh_view_cache(name)
     if out_path.exists():
         return out_path
     if not has_saved_inputs(RESULTS_DIR, name):
@@ -2434,6 +2491,7 @@ def _ensure_3d_html(name: str) -> Path:
         saved_inputs=saved,
         domain_name=name,
         structure_stl_path=structure_stl if structure_stl.exists() else None,
+        satellite=_satellite_for(name, saved),
     )
     return out_path
 
@@ -2453,6 +2511,7 @@ def _ensure_structure_3d_html(name: str, roi_label: Optional[str] = None) -> Pat
     """
     suffix = f"_{roi_label}" if roi_label else ""
     out_path = RESULTS_DIR / name / f"view_3d_structure{suffix}.html"
+    _refresh_view_cache(name)
     if out_path.exists():
         return out_path
     if not has_saved_inputs(RESULTS_DIR, name):
@@ -2469,6 +2528,7 @@ def _ensure_structure_3d_html(name: str, roi_label: Optional[str] = None) -> Pat
         domain_name=name,
         structure_stl_path=structure_stl if structure_stl.exists() else None,
         roi_label=roi_label,
+        satellite=_satellite_provider_for(name, saved, m_per_px=0.25),
     )
     return out_path
 

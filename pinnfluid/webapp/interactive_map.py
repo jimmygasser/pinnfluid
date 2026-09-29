@@ -102,7 +102,9 @@ def _footprint_path(points, angle, cx, cy) -> str:
 
 def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
                    pred_flow: "np.ndarray | None" = None,
-                   roi_pred_flows: Optional[dict] = None) -> Path:
+                   roi_pred_flows: Optional[dict] = None,
+                   transform_meta: Optional[dict] = None,
+                   satellite=None) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -250,6 +252,19 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
                            line=dict(color="#ffd54f", width=1.0, dash="dot"),
                            layer="above"))
 
+    # Aerial photo (swisstopo SWISSIMAGE) under everything, and a "Satellite"
+    # view that hides the field layers so only the photo, contours, structure
+    # footprints and ROI boxes remain. The image goes through the same
+    # LV95 -> local -> display-rotation chain as the field layers.
+    layout_images = []
+    if satellite is not None and transform_meta:
+        try:
+            layout_images.append(satellite.layout_image(transform_meta, _rotpt, angle, cx, cy))
+            views.insert(0, ("Satellite image", [],
+                             f"{domain_name} - aerial photo (swisstopo SWISSIMAGE)"))
+        except Exception:
+            layout_images = []
+
     n = len(fig.data)
     default = set(views[0][1]) | set(persistent)
     for i in range(n):
@@ -266,6 +281,7 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
 
     fig.update_layout(
         title=None,
+        images=layout_images,
         shapes=shapes,
         xaxis=dict(title="x [m]", constrain="domain", visible=False),
         yaxis=dict(scaleanchor="x", scaleratio=1, visible=False),

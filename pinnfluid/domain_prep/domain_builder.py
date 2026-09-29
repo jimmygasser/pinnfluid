@@ -387,14 +387,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script>
 var map = L.map('map').setView([46.8, 8.22], 9);
-L.tileLayer(
+// Base layers: SWISSIMAGE aerial photo (default) or the national map;
+// relief shading is an optional overlay on either.
+var baseSat = L.tileLayer(
+  'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg',
+  { attribution:'&copy; swisstopo (SWISSIMAGE)', maxZoom:20 });
+var baseMap = L.tileLayer(
   'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg',
-  { attribution:'&copy; swisstopo', maxZoom:20 }
-).addTo(map);
-L.tileLayer(
+  { attribution:'&copy; swisstopo', maxZoom:20 });
+var relief = L.tileLayer(
   'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissalti3d-reliefschattierung/default/current/3857/{z}/{x}/{y}.png',
-  { opacity:0.35, maxZoom:20 }
-).addTo(map);
+  { opacity:0.35, maxZoom:20 });
+baseSat.addTo(map); relief.addTo(map);
+L.control.layers({ 'Satellite': baseSat, 'Map': baseMap }, { 'Relief shading': relief },
+                 { position:'topright', collapsed:false }).addTo(map);
 
 var drawnTerrain = new L.FeatureGroup(); map.addLayer(drawnTerrain);
 var structMarkers = new L.FeatureGroup(); map.addLayer(structMarkers);
