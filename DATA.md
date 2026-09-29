@@ -16,17 +16,23 @@ included under `single_stl/`.
   Each case folder holds:
   | file          | contents                                                        |
   |---------------|-----------------------------------------------------------------|
-  | `terrain.npz` | terrain elevation, slope/aspect, roughness, domain metadata     |
-  | `flow.npz`    | the steady RANS solution (velocity components, pressure)        |
+  | `terrain.npz` | terrain elevation, slope and aspect                             |
+  | `flow.npz`    | the steady RANS solution (velocity components, pressure) and the fluid mask |
   | `nut.npy`     | turbulent viscosity field                                       |
-  | `meta.json`   | inflow speed/direction, reference height, roughness, grid info  |
+  | `meta.json`   | inflow speed/direction, reference height, roughness length, grid info |
+
+  The aerodynamic roughness length is constant in this dataset
+  (`z0 = 0.1` m for every domain). It is therefore stored once per case in
+  `meta.json` and not as a map in `terrain.npz`.
 
   Cases that contain structures (`singlestructures/`, `multistructures/`) also
   have a `roi/` subfolder with one refined region of interest per structure or
   cluster (`roi/roi_000/`, `roi/roi_001/`, ...). Each ROI holds the same
-  `terrain.npz` / `flow.npz` / `meta.json` at the fine ~0.5 m resolution, in the
-  same coordinate frame as the parent domain. These are what the Stage-2 refiner
-  is trained and evaluated on. Terrain-only cases have no `roi/`.
+  `terrain.npz` / `flow.npz` / `nut.npy` / `meta.json` at the fine ~0.5 m
+  resolution, in the same coordinate frame as the parent domain, plus
+  `phi_wall.npy`, the signed distance to the nearest structure surface. These
+  are what the Stage-2 refiner is trained and evaluated on. Terrain-only cases
+  have no `roi/`.
 
 
 - **Structure geometry** — the STL primitive library (`single_stl/`): panels,
