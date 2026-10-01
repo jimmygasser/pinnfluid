@@ -107,9 +107,8 @@ feature list and the important security/deployment caveats.
 
 ## Reproducing the two final models
 
-The training dataset is not yet currently distributed publicly (see
-[`DATA.md`](DATA.md)). Once the CFD data is available under `data/cfd/`, create
-the mirrored training root:
+Download the training dataset and extract it under `data/cfd/` as described in
+[`DATA.md`](DATA.md). Then create the mirrored training root:
 
 ```bash
 python pinnfluid/input_prep/make_y_mirror_cfd.py \
@@ -131,7 +130,9 @@ inference rebuilds the network without needing the YAML.
 
 ## Data and weights
 
-- **Datasets** (OpenFOAM CFD fields + structure STLs): see [`DATA.md`](DATA.md).
+- **Datasets** (OpenFOAM CFD fields + structure STLs): archived on EnviDat,
+  DOI [10.16904/envidat.810](https://doi.org/10.16904/envidat.810); see
+  [`DATA.md`](DATA.md) for the layout and download instructions.
 - **Model weights** (4 checkpoints, ~220 MB): fetched into
   `pinnfluid/webapp/checkpoints/`. They are not tracked in git; see that
   folder's README.
