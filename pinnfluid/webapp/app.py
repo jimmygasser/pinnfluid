@@ -2352,6 +2352,7 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     # Persist inputs + predictions BEFORE cleanup so on-demand exports and the
     # 3D viewer can be (re)generated later without rerunning the model. Stale
     # 3D viewer HTML from a previous run of the same name is dropped first.
+    _begin_save(name)  # no export archive is built from a half-saved run
     _invalidate_3d_cache(name)
     selection_path = DEM_ROOT / name / "selection.json"
     try:
@@ -2368,6 +2369,8 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     except Exception as e:
         print(f"[predict_web] save_inputs warning: {e}", flush=True)
         traceback.print_exc()
+    finally:
+        _end_save(name)
     t_save = time.time() - t0 - t_infer - t_plots
 
     _p("computing stats + report…")
@@ -2939,9 +2942,40 @@ def _admit_export_locked(name: str) -> None:
         raise ExportBusy()
 
 
+_SAVING: set = set()  # runs whose prediction is being saved: no archive is built then
+
+
+def _generation_file(name: str) -> Path:
+    return RESULTS_DIR / name / "inputs" / "generation"
+
+
+def _begin_save(name: str) -> None:
+    """A prediction of `name` starts saving: its files change one after the other."""
+    with _EXPORTS_LOCK:
+        _SAVING.add(name)
+
+
+def _end_save(name: str) -> None:
+    """The save is complete: a new generation names it (written last, atomically)."""
+    marker = _generation_file(name)
+    try:
+        if marker.parent.is_dir():
+            tmp = marker.with_name(f".generation.{uuid.uuid4().hex}")
+            tmp.write_text(uuid.uuid4().hex)
+            tmp.replace(marker)
+    finally:
+        with _EXPORTS_LOCK:
+            _SAVING.discard(name)
+
+
 def _run_generation(name: str) -> str:
-    """Names the saved prediction of a run: the modification time of its saved flow
-    field, which every new prediction of the run writes again."""
+    """Names the saved prediction of a run: the marker written at the end of its last
+    complete save (_end_save); for a run saved before markers existed, the
+    modification time of its saved flow field."""
+    try:
+        return _generation_file(name).read_text().strip()
+    except OSError:
+        pass
     flow = RESULTS_DIR / name / "inputs" / "cfd" / "flow.npz"
     try:
         return str(flow.stat().st_mtime_ns)
@@ -2962,10 +2996,12 @@ def _cached_export(name: str, kind: str, build: Callable[[Path], None]) -> Path:
     """
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
-    generation = _run_generation(name)
-    final = RESULTS_DIR / name / "exports" / f"{name}_{kind}-{generation}.zip"
-    key = (name, kind, generation)
     with _EXPORTS_LOCK:
+        if name in _SAVING:  # a new prediction is being saved: its files are half new
+            raise ExportBusy()
+        generation = _run_generation(name)
+        final = RESULTS_DIR / name / "exports" / f"{name}_{kind}-{generation}.zip"
+        key = (name, kind, generation)
         if final.is_file():
             return final
         event = _EXPORT_BUILDS.get(key)

@@ -193,6 +193,38 @@ class ExportCacheTests(unittest.TestCase):
         self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
         self.assertEqual(self.vtk.calls, 2, "the archive of the old prediction was served for the new one")
 
+    def test_no_archive_is_built_while_a_prediction_is_being_saved(self):
+        """A save rewrites the flow fields first and the rest after; an archive built in
+        between would mix two predictions. While the save runs, a download gets 429;
+        the generation changes only once the save is complete."""
+        browser = self.browser_with_runs("site")
+        run = self.run_name(browser, "site")
+        app._begin_save(run)  # the first prediction's save
+        app._end_save(run)
+        self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
+        before = app._run_generation(run)
+        app._begin_save(run)
+        try:
+            (self.results / run / "inputs" / "cfd" / "flow.npz").write_bytes(b"prediction 2")
+            status, _, body = browser.request("GET", "/download_vtk?domain=site")
+            self.assertEqual(status, 429, body)
+            self.assertEqual(app._run_generation(run), before)  # not the half-saved one
+        finally:
+            app._end_save(run)
+        self.assertNotEqual(app._run_generation(run), before)
+        self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
+        self.assertEqual(self.vtk.calls, 2)
+
+    def test_the_generation_is_written_at_the_end_of_every_save(self):
+        browser = self.browser_with_runs("site")
+        run = self.run_name(browser, "site")
+        generations = set()
+        for _ in range(3):
+            app._begin_save(run)
+            app._end_save(run)
+            generations.add(app._run_generation(run))
+        self.assertEqual(len(generations), 3)
+
     def test_a_run_being_exported_is_not_removed_by_the_retention(self):
         gate = threading.Event()
         self.vtk.gate = gate
