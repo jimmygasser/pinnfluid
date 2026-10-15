@@ -79,12 +79,15 @@ _FLOW = _PRELUDE + textwrap.dedent("""
         headers = {"Content-Type": "application/json"}
         if jar:
             headers["Cookie"] = jar["cookie"]
-        conn.request(method, path, body=None if payload is None else json.dumps(payload),
-                     headers=headers)
-        r = conn.getresponse()
-        if r.getheader("Set-Cookie"):
-            jar["cookie"] = r.getheader("Set-Cookie").split(";", 1)[0]
-        return r.status, r.read()
+        try:
+            conn.request(method, path, body=None if payload is None else json.dumps(payload),
+                         headers=headers)
+            r = conn.getresponse()
+            if r.getheader("Set-Cookie"):
+                jar["cookie"] = r.getheader("Set-Cookie").split(";", 1)[0]
+            return r.status, r.read()
+        finally:
+            conn.close()
 
     def post(path, payload):
         status, body = send("POST", path, payload)

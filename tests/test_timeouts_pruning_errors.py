@@ -250,6 +250,7 @@ class WorkDirPruningTests(unittest.TestCase):
                     {"domain_name": "site", "data_base64": "A" * 2000}))
                 self.assertEqual(conn.getresponse().status, 200)
         finally:
+            conn.close()
             server.shutdown()
             server.server_close()
         self.assertFalse(old_dem.exists())
@@ -285,11 +286,14 @@ class ClientErrorTests(unittest.TestCase):
         headers = {"Content-Type": "application/json"}
         if self.cookie:
             headers["Cookie"] = self.cookie
-        conn.request(method, path, body=None if body is None else json.dumps(body), headers=headers)
-        r = conn.getresponse()
-        if r.getheader("Set-Cookie"):
-            self.cookie = r.getheader("Set-Cookie").split(";", 1)[0]
-        return r.status, json.loads(r.read())
+        try:
+            conn.request(method, path, body=None if body is None else json.dumps(body), headers=headers)
+            r = conn.getresponse()
+            if r.getheader("Set-Cookie"):
+                self.cookie = r.getheader("Set-Cookie").split(";", 1)[0]
+            return r.status, json.loads(r.read())
+        finally:
+            conn.close()
 
     def test_an_internal_error_answers_with_a_reference_only(self):
         boom = OSError("[Errno 2] /app/pinnfluid/webapp/workspace/cfd/x/meta.json: lost")
@@ -392,10 +396,13 @@ class GlobalLimitTests(unittest.TestCase):
                     patch.object(app, "_job_start"):
                 for i in range(3):  # three browsers
                     conn = http.client.HTTPConnection(*server.server_address, timeout=20)
-                    conn.request("POST", "/predict", body=json.dumps(dict(BODY, domain_name=f"d{i}")),
-                                 headers={"X-Forwarded-For": f"10.0.0.{i}"})
-                    r = conn.getresponse()
-                    statuses.append((r.status, json.loads(r.read())))
+                    try:
+                        conn.request("POST", "/predict", body=json.dumps(dict(BODY, domain_name=f"d{i}")),
+                                     headers={"X-Forwarded-For": f"10.0.0.{i}"})
+                        r = conn.getresponse()
+                        statuses.append((r.status, json.loads(r.read())))
+                    finally:
+                        conn.close()
         finally:
             server.shutdown()
             server.server_close()

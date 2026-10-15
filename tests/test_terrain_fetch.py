@@ -18,6 +18,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -81,7 +82,11 @@ class NodataAndProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             src, out = Path(tmp) / "in.tif", Path(tmp) / "merged.tif"
             write_tif(src, data, crs="EPSG:32632", nodata=-DBL_MAX)
-            dem_prep.merge_tifs([str(src)], str(out))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                dem_prep.merge_tifs([str(src)], str(out))
+            # the nodata is mapped before the cast to float32, which cannot hold it
+            self.assertEqual([str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)], [])
             with rasterio.open(out) as merged:
                 self.assertEqual(merged.nodata, -9999.0)
                 values = merged.read(1)
