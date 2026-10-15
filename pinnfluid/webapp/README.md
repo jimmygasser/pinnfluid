@@ -119,7 +119,8 @@ unpkg CDN.
 ## Security / deployment status
 
 Bound to `127.0.0.1` by default and **no authentication**. Domain names are
-sanitised against path traversal and structure types must be shipped
+letters, digits, `-`, `_` and `.` (at most 64, starting with a letter or digit),
+download names follow RFC 6266, and structure types must be shipped
 `single_stl/*.stl` files. Uploaded DEMs are opened as GeoTIFF only (never VRT or
 another GDAL format), with the GDAL defaults `GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR`
 and `CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.none`, and their pixel count is checked

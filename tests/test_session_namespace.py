@@ -221,7 +221,8 @@ class IsolationTests(SessionTestCase):
             status, headers, body = browser.request("GET", "/pinnfluid/download_pdf?domain=shared")
             self.assertEqual(status, 200)
             self.assertEqual(body, b"%PDF of " + owner)
-            self.assertEqual(headers["Content-Disposition"], 'attachment; filename="shared_report.pdf"')
+            self.assertEqual(headers["Content-Disposition"],
+                             "attachment; filename=\"shared_report.pdf\"; filename*=UTF-8''shared_report.pdf")
             status, _, body = browser.request("GET", "/pinnfluid/download_zip?domain=shared")
             self.assertEqual(status, 200)
             with zipfile.ZipFile(io.BytesIO(body)) as zf:

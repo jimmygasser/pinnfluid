@@ -136,22 +136,33 @@ from pressure_reference import (  # type: ignore  noqa: E402
 # ---------------------------------------------------------------------------
 # Name sanitisation (single chokepoint for every user-supplied domain name)
 # ---------------------------------------------------------------------------
-def _safe_name(raw) -> str:
-    """Sanitise a user-supplied domain name before it touches the filesystem.
+_MAX_NAME_LENGTH = 64  # a name as the user types it
+# Letters, digits, '-', '_' and '.', starting with a letter or digit: a name is a
+# directory name, a download file name and a log field, so nothing else gets in.
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_NAME_RULE = (f"A domain name may contain only letters, digits, '-', '_' and '.', must start "
+              f"with a letter or digit, and may have at most {_MAX_NAME_LENGTH} characters.")
 
-    Mirrors build_inputs._case_paths' replacement rules and additionally
-    rejects traversal-shaped names, so `?domain=../../...` cannot escape
-    RESULTS_DIR / dem/ regardless of which endpoint received it.
+
+def _safe_name(raw) -> str:
+    """Check a domain name before it touches the filesystem, a header or a log.
+
+    The allow-list (_NAME_RE, no "..") is the single chokepoint for every name an
+    endpoint receives, so `?domain=../../...`, quotes or line breaks never reach
+    RESULTS_DIR / dem/, a Content-Disposition header or the log. On-disk names
+    (namespace + name + wind-rose suffix) may have up to 128 characters.
     """
-    s = str(raw or "").strip().replace("/", "_").replace("\\", "_")
-    if not s or s.startswith(".") or ".." in s:
-        raise ValueError(f"invalid domain name: {raw!r}")
-    if len(s) > 128:  # on-disk names: namespace + user name + wind-rose suffix
-        raise ValueError("the domain name is too long")
+    s = str("" if raw is None else raw).strip()
+    if not _NAME_RE.fullmatch(s) or ".." in s or len(s) > 128:
+        raise ValueError(_NAME_RULE)
     return s
 
 
-_MAX_NAME_LENGTH = 64  # a name as the user types it
+def _attachment(filename: str) -> str:
+    """A Content-Disposition value for a download (RFC 6266): an ASCII filename=
+    with anything unusual replaced, and the exact name as filename*=UTF-8''."""
+    fallback = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 def _check_structure_type(item: dict) -> None:
@@ -194,7 +205,7 @@ def _session_name(namespace: str, raw) -> str:
     if name.startswith(prefix):
         return name
     if len(name) > _MAX_NAME_LENGTH:
-        raise ValueError(f"the domain name is longer than {_MAX_NAME_LENGTH} characters")
+        raise ValueError(_NAME_RULE)
     return prefix + name
 
 
@@ -675,10 +686,10 @@ def _satellite_for(name: str, saved: dict):
         return get_satellite_for_run(
             RESULTS_DIR / name, saved.get("transform_meta"),
             bundle.x_coords, bundle.y_coords,
-            log=lambda msg: print(f"[{name}] {msg}", flush=True),
+            log=lambda msg: print(f"[{name!r}] {msg}", flush=True),
         )
     except Exception as exc:  # never let the texture break a view
-        print(f"[{name}] satellite: skipped ({exc})", flush=True)
+        print(f"[{name!r}] satellite: skipped ({exc})", flush=True)
         return None
 
 
@@ -690,10 +701,10 @@ def _satellite_provider_for(name: str, saved: dict, *, m_per_px: float):
             return get_satellite_for_run(
                 RESULTS_DIR / name, saved.get("transform_meta"), x_coords, y_coords,
                 tag=tag, m_per_px=m_per_px,
-                log=lambda msg: print(f"[{name}] {msg}", flush=True),
+                log=lambda msg: print(f"[{name!r}] {msg}", flush=True),
             )
         except Exception as exc:
-            print(f"[{name}] satellite/{tag}: skipped ({exc})", flush=True)
+            print(f"[{name!r}] satellite/{tag}: skipped ({exc})", flush=True)
             return None
     return _provide
 
@@ -3204,7 +3215,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/zip")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{_display_name(domain)}_plots.zip"',
+                    _attachment(f"{_display_name(domain)}_plots.zip"),
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -3223,7 +3234,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_path(
                     zip_path,
                     content_type="application/zip",
-                    content_disposition=f'attachment; filename="{_display_name(domain)}_vtk.zip"',
+                    content_disposition=_attachment(f"{_display_name(domain)}_vtk.zip"),
                     allow_gzip=False,
                 )
             except Exception as ex:
@@ -3241,7 +3252,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/zip")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{_display_name(domain)}_npz.zip"',
+                    _attachment(f"{_display_name(domain)}_npz.zip"),
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -3261,7 +3272,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/pdf")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{_display_name(domain)}_report.pdf"',
+                    _attachment(f"{_display_name(domain)}_report.pdf"),
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -3292,7 +3303,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 domain = self._domain(domain)
                 html_path = _ensure_3d_html(domain)
                 disposition = (
-                    f'attachment; filename="{_display_name(domain)}_view_3d.html"'
+                    _attachment(f"{_display_name(domain)}_view_3d.html")
                     if path == "/download_3d" else None
                 )
                 self._send_path(
@@ -3329,7 +3340,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if path == "/download_3d_structure":
                     fn_suffix = f"_{roi_label}" if roi_label else ""
                     disposition = (
-                        f'attachment; filename="{_display_name(domain)}_view_3d_structure{fn_suffix}.html"'
+                        _attachment(f"{_display_name(domain)}_view_3d_structure{fn_suffix}.html")
                     )
                 self._send_path(
                     html_path,
@@ -3366,7 +3377,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 busy.enter_context(_busy(name))
                 output_dir = os.path.join(self.dem_root, name)
 
-                print(f"\n[DEM] {name}: W={west:.5f} S={south:.5f} E={east:.5f} N={north:.5f}", flush=True)
+                print(f"\n[DEM] {name!r}: W={west:.5f} S={south:.5f} E={east:.5f} N={north:.5f}", flush=True)
                 tiles = query_stac_tiles(west, south, east, north, resolution=res)
                 if not tiles:
                     self._json({"success": False, "error": "No tiles found"})
