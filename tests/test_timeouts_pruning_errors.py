@@ -103,7 +103,7 @@ class StepTimeoutTests(unittest.TestCase):
 
         href = "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/a/a_2_2056_5728.tif"
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(domain_builder.urllib.request, "urlopen", side_effect=fake_urlopen):
+                patch.object(domain_builder, "_stac_open", side_effect=fake_urlopen):
             downloaded, failed = domain_builder.download_tiles([{"name": "t.tif", "href": href}], tmp)
             self.assertEqual((downloaded, failed), (1, 0))
             self.assertEqual((Path(tmp) / "t.tif").read_bytes(), b"x" * 2000)

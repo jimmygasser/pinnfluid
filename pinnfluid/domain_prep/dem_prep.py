@@ -190,6 +190,12 @@ def merge_tifs(tif_paths: List[str], out_tif: str, input_nodata: Optional[float]
 
     # If merged array has multiple bands, take first
     data = mosaic[0].astype(np.float32)
+    # A nodata outside the float32 range (ArcGIS writes -1.797e308 for 64-bit
+    # floats) cannot be the nodata of the float32 file: map it to -9999.
+    if input_nodata is not None and np.isfinite(input_nodata) \
+            and abs(float(input_nodata)) > float(np.finfo(np.float32).max):
+        data[mosaic[0] == input_nodata] = -9999.0
+        profile["nodata"] = -9999.0
 
     with rasterio.open(out_tif, "w", **profile) as dst:
         dst.write(data, 1)

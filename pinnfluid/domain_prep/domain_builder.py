@@ -1539,6 +1539,25 @@ def _is_stac_host_url(url) -> bool:
         return False
     return parts.scheme == "https" and parts.hostname == STAC_HOST and parts.port is None
 
+class _StacRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to https://data.geo.admin.ch (urllib's default
+    follows one to any host, and to http)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_stac_host_url(newurl):
+            raise urllib.error.HTTPError(newurl, code, f"redirect away from {STAC_HOST} refused",
+                                         headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_STAC_OPENER = urllib.request.build_opener(_StacRedirectHandler)
+
+
+def _stac_open(url, timeout):
+    """GET a STAC page or a tile (a URL or a Request) with the redirect check."""
+    return _STAC_OPENER.open(url, timeout=timeout)
+
+
 def query_stac_tiles(west, south, east, north, resolution="2"):
     import re
     all_tiles = []
@@ -1546,7 +1565,7 @@ def query_stac_tiles(west, south, east, north, resolution="2"):
     while url:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+            with _stac_open(req, timeout=HTTP_TIMEOUT_S) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as e:
             print(f"[ERROR] STAC query failed: {e}", file=sys.stderr)
@@ -1606,7 +1625,7 @@ def _download(url, filepath):
     """GET `url` into `filepath`, within HTTP_TIMEOUT_S per read and MAX_TILE_BYTES."""
     tmp = filepath + ".part"
     try:
-        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as resp, open(tmp, "wb") as out:
+        with _stac_open(url, timeout=HTTP_TIMEOUT_S) as resp, open(tmp, "wb") as out:
             total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
@@ -1638,17 +1657,24 @@ def lv95_to_wgs84_point(e, n):
     lng, lat = tf.transform(e, n)
     return lng, lat
 
+def _dem_profile(crs, transform, width, height, nodata):
+    """A single-band float32 GeoTIFF profile with 256-pixel tiles."""
+    return {"driver": "GTiff", "dtype": "float32", "count": 1, "width": width, "height": height,
+            "crs": crs, "transform": transform, "nodata": nodata, "compress": "lzw",
+            "tiled": True, "blockxsize": 256, "blockysize": 256}
+
+
 def merge_and_crop(output_dir, e_min, n_min, e_max, n_max, nodata=-9999.0):
     tif_files = sorted(glob.glob(os.path.join(output_dir, "swissalti3d_*.tif")))
     if not tif_files:
         raise FileNotFoundError(f"No .tif files in {output_dir}")
     srcs = [rasterio.open(f, driver="GTiff") for f in tif_files]
     mosaic, mosaic_transform = rasterio_merge(srcs, nodata=nodata)
-    profile = srcs[0].profile.copy()
+    crs = srcs[0].crs
     for s in srcs: s.close()
-    profile.update(height=mosaic.shape[1], width=mosaic.shape[2],
-                   transform=mosaic_transform, count=1, nodata=nodata,
-                   compress="lzw", tiled=True, dtype="float32")
+    # Fresh float32 profiles: a copied source profile carries the source's block
+    # size, which a striped tile makes invalid for a tiled file.
+    profile = _dem_profile(crs, mosaic_transform, mosaic.shape[2], mosaic.shape[1], nodata)
     merged_path = os.path.join(output_dir, "dem_merged.tif")
     with rasterio.open(merged_path, "w", **profile) as dst:
         dst.write(mosaic[0].astype(np.float32), 1)
@@ -1660,9 +1686,7 @@ def merge_and_crop(output_dir, e_min, n_min, e_max, n_max, nodata=-9999.0):
         win = from_bounds(cl, cb, cr, ct, transform=src.transform)
         arr = src.read(1, window=win).astype(np.float32)
         crop_tf = src.window_transform(win)
-        cp = src.profile.copy()
-        cp.update(height=arr.shape[0], width=arr.shape[1], transform=crop_tf,
-                  count=1, nodata=nodata, compress="lzw", tiled=True, dtype="float32")
+        cp = _dem_profile(src.crs, crop_tf, arr.shape[1], arr.shape[0], nodata)
         with rasterio.open(cropped_path, "w", **cp) as dst:
             dst.write(arr, 1)
     # cleanup

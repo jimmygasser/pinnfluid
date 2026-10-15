@@ -253,14 +253,14 @@ class StacHostTests(unittest.TestCase):
             opened.append(req.full_url)
             return Response(pages[len(opened) - 1])
 
-        with patch.object(domain_builder.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with patch.object(domain_builder, "_stac_open", side_effect=fake_urlopen):
             tiles = domain_builder.query_stac_tiles(7.0, 46.0, 7.01, 46.01)
         self.assertEqual([t["href"] for t in tiles], [good])
         self.assertEqual(len(opened), 1, opened)  # the foreign "next" page is not fetched
 
     def test_downloads_refuse_other_hosts(self):
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(domain_builder.urllib.request, "urlopen") as fetch:
+                patch.object(domain_builder, "_stac_open") as fetch:
             downloaded, failed = domain_builder.download_tiles(
                 [{"name": "swissalti3d_x.tif", "href": "https://evil.example/x.tif"}], tmp)
         self.assertEqual((downloaded, failed), (0, 1))
