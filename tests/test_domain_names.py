@@ -110,7 +110,7 @@ class HttpTests(unittest.TestCase):
     def test_no_header_can_be_injected_through_a_download(self):
         browser = Browser(self.server)
         browser.request("GET", "/")
-        ns = app._session_namespace(browser.cookie.split("=", 1)[1])
+        ns = app._cookie_namespace(browser.cookie.split("=", 1)[1])
         run = self.results / f"{ns}_{INJECTION}"  # as the old code let it be created
         run.mkdir()
         (run / "report.pdf").write_bytes(b"%PDF")

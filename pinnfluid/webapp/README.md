@@ -95,6 +95,7 @@ Environment variables (all optional):
 | `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container (overrides `<work dir>/results`) |
 | `PINN_WEBAPP_BASE_PATH` | (root) | URL prefix behind a gateway, e.g. `/pinnfluid`: the app answers only under it (404 elsewhere) |
 | `PINN_WEBAPP_SECURE_COOKIE` | 0 | set to 1 behind HTTPS: the session cookie gets the `Secure` flag |
+| `PINN_WEBAPP_SESSION_SECRET` | (random per process) | key that signs session ids; set the same value on instances that must share sessions |
 
 `models.yaml` (next to `app.py`) is the file equivalent of `PINN_WEBAPP_MODELS`
 and also sets the default model. On a CPU-only host, serve the fast hybrid only:
@@ -130,8 +131,9 @@ another GDAL format), with the GDAL defaults `GDAL_DISABLE_READDIR_ON_OPEN=EMPTY
 and `CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.none`, and their pixel count is checked
 before decoding. DEM tiles are fetched only from `https://data.geo.admin.ch`.
 HTML endpoints escape user input, request and DEM sizes are bounded, and terrain/prediction operations have optional
-process-wide admission limits. Each browser gets a random session id in an
-HttpOnly cookie (`pinnfluid_session`, scoped to the base path); its domains are
+process-wide admission limits. Each browser gets a random session id, signed by
+the server (it accepts no id it did not issue), in an HttpOnly cookie
+(`pinnfluid_session`, scoped to the base path); its domains are
 stored under a namespace derived from it, so results, terrain and jobs
 (`/job_status`) of one session are not reachable from another, even with the same
 domain name (they answer 404). The past-run index, disabled by default, lists the

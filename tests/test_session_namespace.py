@@ -36,7 +36,7 @@ from webapp import app  # noqa: E402
 import build_inputs  # noqa: E402
 
 COOKIE_RE = re.compile(
-    r"^pinnfluid_session=([0-9a-f]{32}); Path=/pinnfluid/; HttpOnly; SameSite=Lax(; Secure)?$")
+    r"^pinnfluid_session=([0-9a-f]{32}\.[0-9a-f]{32}); Path=/pinnfluid/; HttpOnly; SameSite=Lax(; Secure)?$")
 
 BODY = {
     "domain_name": "shared",
@@ -80,8 +80,8 @@ class Browser:
             conn.close()
 
     @property
-    def session_id(self) -> str:
-        return self.cookie.split("=", 1)[1]
+    def namespace(self) -> str:
+        return app._cookie_namespace(self.cookie.split("=", 1)[1])
 
 
 class SessionTestCase(unittest.TestCase):
@@ -120,7 +120,8 @@ class SessionTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         limits = patch.dict(os.environ, {"PINN_WEBAPP_MAX_ACTIVE_JOBS": "0",
                                          "PINN_WEBAPP_RATE_LIMIT_JOBS": "0",
-                                         "PINN_WEBAPP_RATE_LIMIT_PREP": "0"})
+                                         "PINN_WEBAPP_RATE_LIMIT_PREP": "0",
+                                         "PINN_WEBAPP_SECURE_COOKIE": "0"})
         limits.start()
         self.addCleanup(limits.stop)
         with app._JOBS_LOCK:
@@ -170,7 +171,7 @@ class CookieTests(SessionTestCase):
             self.assertRegex(headers.get("Set-Cookie", ""), COOKIE_RE, value)
 
     def test_the_cookie_is_found_among_others(self):
-        sid = "0123456789abcdef0123456789abcdef"
+        sid = app._sign_session("0123456789abcdef0123456789abcdef")  # as the server issued it
         browser = self.browser(f"other=1; pinnfluid_session={sid}; theme=dark")
         _, headers, _ = browser.request("GET", "/pinnfluid/")
         self.assertNotIn("Set-Cookie", headers)
@@ -306,7 +307,7 @@ class IsolationTests(SessionTestCase):
             status, _, body = alice.request("POST", "/pinnfluid/build_inputs", BODY)
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body)["domain_name"], "shared")
-        ns = app._session_namespace(alice.session_id)
+        ns = alice.namespace
         self.assertEqual(seen, [f"{ns}_shared"])
 
     def test_the_run_index_lists_only_the_sessions_own_runs(self):
@@ -318,7 +319,7 @@ class IsolationTests(SessionTestCase):
         self.assertEqual(status, 200)
         page = body.decode()
         self.assertEqual(page.count("download_pdf?domain="), 1, page)
-        ns_bob = app._session_namespace(bob.session_id)
+        ns_bob = bob.namespace
         self.assertNotIn(ns_bob, page)
 
 

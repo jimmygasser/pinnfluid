@@ -125,7 +125,7 @@ class RetentionTests(unittest.TestCase):
         self.addCleanup(server.close)
         browser = Browser(server)
         browser.request("GET", "/")
-        ns = app._session_namespace(browser.cookie.split("=", 1)[1])
+        ns = app._cookie_namespace(browser.cookie.split("=", 1)[1])
         old = self.run_dir(ns, "old", 900)
         (old / "report.pdf").write_bytes(b"%PDF")
         newer = self.run_dir(ns, "newer", 500)

@@ -117,7 +117,7 @@ _FLOW = _PRELUDE + textwrap.dedent("""
     for view in ("map", "view_3d"):
         status, body = send("GET", f"/{view}?domain=wd-case")
         out[view] = [status, 'src="static/plotly.min.js"' in body.decode("utf-8", "replace")]
-    out["namespace"] = app._session_namespace(jar["cookie"].split("=", 1)[1])
+    out["namespace"] = app._cookie_namespace(jar["cookie"].split("=", 1)[1])
     server.shutdown()
     for step in ("upload", "build"):
         status, body = out[step]

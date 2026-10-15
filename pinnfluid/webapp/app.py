@@ -18,6 +18,7 @@ import binascii
 import contextlib
 import copy
 import hashlib
+import hmac
 import html as _html
 import http.server
 import io
@@ -184,7 +185,39 @@ def _check_structure_type(item: dict) -> None:
 # never share terrain, inputs or results, and nobody can open another session's
 # results by guessing a name. Responses show the name as the user typed it.
 SESSION_COOKIE = "pinnfluid_session"
-_SESSION_ID_RE = re.compile(r"[0-9a-f]{32}")
+# The cookie value is "<id>.<signature>": 128 random bits and an HMAC-SHA-256 (first
+# 128 bits) of the id. The server accepts only ids it signed: a forged or stale id
+# gets a fresh session (a page of the same origin can still plant a cookie the
+# server did sign: the origin is the boundary). The key is
+# PINN_WEBAPP_SESSION_SECRET when instances must share sessions, else a random
+# secret of this process (sessions end with the process, like its jobs).
+_SESSION_VALUE_RE = re.compile(r"([0-9a-f]{32})\.([0-9a-f]{32})")
+_INSTANCE_SECRET = secrets.token_bytes(32)
+
+
+def _session_key() -> bytes:
+    shared = os.environ.get("PINN_WEBAPP_SESSION_SECRET", "")
+    return shared.encode("utf-8") if shared else _INSTANCE_SECRET
+
+
+def _sign_session(session_id: str) -> str:
+    """The cookie value of a session id."""
+    mac = hmac.new(_session_key(), session_id.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    return f"{session_id}.{mac}"
+
+
+def _verified_session_id(value: str) -> Optional[str]:
+    """The id of a cookie value this server signed, else None."""
+    m = _SESSION_VALUE_RE.fullmatch(value or "")
+    if m and hmac.compare_digest(_sign_session(m.group(1)), value):
+        return m.group(1)
+    return None
+
+
+def _cookie_namespace(value: str) -> Optional[str]:
+    """The namespace of a cookie value this server signed, else None."""
+    session_id = _verified_session_id(value)
+    return _session_namespace(session_id) if session_id else None
 _NAMESPACE_PREFIX_RE = re.compile(r"^[0-9a-f]{16}_")
 
 
@@ -3089,12 +3122,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _cookie_session_id(self) -> Optional[str]:
-        """The valid session id the browser sent, if any."""
+        """The id of a session cookie this server issued, if the browser sent one."""
         for header in self.headers.get_all("Cookie") or []:
             for part in header.split(";"):
                 key, _, value = part.strip().partition("=")
-                if key == SESSION_COOKIE and _SESSION_ID_RE.fullmatch(value.strip('"')):
-                    return value.strip('"')
+                if key == SESSION_COOKIE:
+                    session_id = _verified_session_id(value.strip('"'))
+                    if session_id:
+                        return session_id
         return None
 
     def _session(self) -> str:
@@ -3117,7 +3152,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return name
 
     def _session_cookie(self, session_id: str) -> str:
-        attrs = [f"{SESSION_COOKIE}={session_id}", f"Path={self.base_path}/", "HttpOnly",
+        attrs = [f"{SESSION_COOKIE}={_sign_session(session_id)}", f"Path={self.base_path}/", "HttpOnly",
                  "SameSite=Lax"]
         if _env_flag("PINN_WEBAPP_SECURE_COOKIE", False):
             attrs.append("Secure")
@@ -3334,9 +3369,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/job_status":
             qs = parse_qs(urlparse(self.path).query)
             jid = unquote(qs.get("id", [""])[0]).strip()
+            session = self._session()  # a browser without a session gets one here too
             job = _job_get(jid)
             # Another session's job is answered exactly like an unknown one.
-            if job is None or job.pop("session", None) != self._session():
+            if job is None or job.pop("session", None) != session:
                 self._json({"error": "unknown job", "state": "error"}, status=404)
             else:
                 self._json(job)

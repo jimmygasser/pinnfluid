@@ -93,7 +93,7 @@ class ExportCacheTests(unittest.TestCase):
     def browser_with_runs(self, *names) -> Browser:
         browser = Browser(self.server)
         browser.request("GET", "/")
-        ns = app._session_namespace(browser.cookie.split("=", 1)[1])
+        ns = app._cookie_namespace(browser.cookie.split("=", 1)[1])
         for name in names:
             (self.results / f"{ns}_{name}" / "inputs").mkdir(parents=True)
         return browser
@@ -130,7 +130,7 @@ class ExportCacheTests(unittest.TestCase):
     def test_a_new_prediction_invalidates_the_cache(self):
         browser = self.browser_with_runs("site")
         self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
-        ns = app._session_namespace(browser.cookie.split("=", 1)[1])
+        ns = app._cookie_namespace(browser.cookie.split("=", 1)[1])
         app._invalidate_3d_cache(f"{ns}_site")
         self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
         self.assertEqual(self.vtk.calls, 2)
