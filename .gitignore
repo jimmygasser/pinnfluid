@@ -31,3 +31,6 @@ env/
 Thumbs.db
 .idea/
 .vscode/
+
+# --- Vendored map libraries (fetched at deployment, see pinnfluid/webapp/static/vendor/README.md) ---
+pinnfluid/webapp/static/vendor/*/

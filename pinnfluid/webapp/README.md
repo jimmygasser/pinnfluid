@@ -104,7 +104,10 @@ pruned automatically to stay within `PINN_WEBAPP_MAX_RUNS` and
 and `workspace/` are git-ignored. The 3D viewers and the map load plotly.js from
 the app itself (`static/plotly.min.js`, a relative URL like every other URL
 the app renders, so the pages also work under `PINN_WEBAPP_BASE_PATH`), so
-they work offline and under a strict CSP.
+they work offline and under a strict CSP. The page loads Leaflet and leaflet-draw from
+`static/vendor/` the same way; those files are fetched at deployment (see
+`static/vendor/README.md`), or `PINN_WEBAPP_LEAFLET_CDN=1` loads them from the
+unpkg CDN.
 
 ## Security / deployment status
 

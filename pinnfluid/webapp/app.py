@@ -140,6 +140,51 @@ def _safe_name(raw) -> str:
     return s
 
 
+# Leaflet 1.9.4 and leaflet-draw 1.0.4, served by the app from static/vendor/
+# instead of the unpkg CDN (offline, strict CSP, base path). The files are not in
+# the repository: a deployment puts them there from pinned, hash-checked
+# downloads (see static/vendor/README.md). The page refers to them by relative
+# URLs; the CSS files load their images/ next to themselves.
+VENDOR_DIR = Path(__file__).resolve().parent / "static" / "vendor"
+_VENDOR_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    "": "text/plain; charset=utf-8",  # LICENSE
+}
+_VENDOR_PATH_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
+_VENDOR_TAGS = {
+    '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>':
+        '<link rel="stylesheet" href="static/vendor/leaflet/leaflet.css"/>',
+    '<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>':
+        '<link rel="stylesheet" href="static/vendor/leaflet-draw/leaflet.draw.css"/>',
+    '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>':
+        '<script src="static/vendor/leaflet/leaflet.js"></script>',
+    '<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>':
+        '<script src="static/vendor/leaflet-draw/leaflet.draw.js"></script>',
+}
+VENDOR_FILES = (
+    "leaflet/leaflet.js", "leaflet/leaflet.css", "leaflet-draw/leaflet.draw.js",
+    "leaflet-draw/leaflet.draw.css",
+)
+
+
+def _vendor_file(rel: str) -> Optional[tuple[Path, str]]:
+    """(path, content type) of a vendored asset, or None for anything else."""
+    if not _VENDOR_PATH_RE.fullmatch(rel):
+        return None
+    suffix = Path(rel).suffix.lower()
+    ctype = _VENDOR_TYPES.get(suffix)
+    if ctype is None or (suffix == "" and Path(rel).name != "LICENSE"):
+        return None
+    root = VENDOR_DIR.resolve()
+    path = (root / rel).resolve()
+    if root not in path.parents or not path.is_file():
+        return None
+    return path, ctype
+
+
 _PLOTLY_JS_CACHE: Optional[bytes] = None
 
 
@@ -464,6 +509,13 @@ def _companion_model_id(primary_id: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 def _build_html() -> str:
     html = BUILDER_HTML
+    # Leaflet from the app (VENDOR_DIR), not from the CDN of the template, unless
+    # PINN_WEBAPP_LEAFLET_CDN=1 asks for the CDN (a checkout without the files).
+    if not _env_flag("PINN_WEBAPP_LEAFLET_CDN", False):
+        for cdn_tag, vendored_tag in _VENDOR_TAGS.items():
+            if cdn_tag not in html:
+                raise RuntimeError(f"Leaflet tag not found in the builder template: {cdn_tag}")
+            html = html.replace(cdn_tag, vendored_tag)
     html = html.replace(
         "Domain Builder — pinn_terr_struc",
         "pinnfluid - Wind and pressure prediction",
@@ -2779,6 +2831,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path.startswith("/static/vendor/"):
+            found = _vendor_file(path[len("/static/vendor/"):])
+            if found is None:
+                self.send_error(404)
+                return
+            body = found[0].read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", found[1])
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in ("/", "/index.html"):
             body = self.page_html.encode("utf-8")
             self.send_response(200)
@@ -3197,6 +3262,13 @@ def main() -> None:
     url = f"http://{shown_host}:{args.port}{Handler.base_path}/"
     print(f"[predict_web] Serving at {url}  (bind {args.host}:{args.port})")
     print(f"[predict_web] Results root: {RESULTS_DIR}")
+    missing = [f for f in VENDOR_FILES if not (VENDOR_DIR / f).is_file()]
+    if _env_flag("PINN_WEBAPP_LEAFLET_CDN", False):
+        print("[predict_web] Leaflet from the unpkg CDN (PINN_WEBAPP_LEAFLET_CDN=1)")
+    elif missing:
+        print(f"[predict_web] WARNING: Leaflet is not vendored ({', '.join(missing)} missing "
+              f"under {VENDOR_DIR}); the map will not load. See static/vendor/README.md, "
+              "or set PINN_WEBAPP_LEAFLET_CDN=1 to load it from the unpkg CDN.")
     print(f"[predict_web] Runtime: {runtime_device_info()}")
     # Only auto-open a browser for a local bind, never inside a container.
     if not args.no_browser and args.host in ("127.0.0.1", "localhost"):
