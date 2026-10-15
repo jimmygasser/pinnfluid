@@ -163,6 +163,28 @@ class UploadDeadlineTests(unittest.TestCase):
         self.assertIsNotNone(took)
         self.assertLess(took, 4)
 
+    def test_other_routes_keep_the_base_deadline(self):
+        """Only upload_dem carries a large body: the other POST routes take small JSON,
+        so a large declared Content-Length buys them no time."""
+        self.env(HEADER_DEADLINE_S=5, REQUEST_DEADLINE_S=1, MIN_UPLOAD_RATE=100)
+        for route in ("/build_inputs", "/predict", "/download_dem"):
+            sock = socket.create_connection(self.server.address, timeout=10)
+            self.addCleanup(sock.close)
+            sock.sendall(f"POST {route} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         "Content-Length: 1000\r\n\r\n{".encode())
+            took = closed_within(sock, 8, b" " * 50)
+            self.assertIsNotNone(took, route)
+            self.assertLess(took, 3.5, route)
+
+    def test_an_upload_that_falls_below_the_rate_is_stopped_early(self):
+        """The upload deadline is a minimum rate, not a grant of the declared size:
+        after the base deadline, the bytes received must keep up with it."""
+        self.env(HEADER_DEADLINE_S=5, REQUEST_DEADLINE_S=1, MIN_UPLOAD_RATE=100)
+        started = time.monotonic()
+        answer = self.post_slowly(b"{" + b" " * 1999, 2, 0.5)  # 4 B/s against a deadline of 20 s
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 408"), answer[:120])
+
     def test_the_page_explains_a_failed_upload(self):
         self.assertIn("the upload was too slow", app._build_html())
 
@@ -231,6 +253,18 @@ class AdmissionBeforeBodyTests(unittest.TestCase):
             status, payload = Browser(self.server).json("POST", "/upload_dem", {"domain_name": "x"})
         self.assertEqual(status, 400)
         self.assertIn("data_base64", payload["error"])
+
+
+class UnknownPostRouteTests(unittest.TestCase):
+    def test_an_unknown_post_route_answers_404_before_the_body(self):
+        server = Server(app)
+        self.addCleanup(server.close)
+        for route in ("/nothing", "/view_3d", "/status"):
+            sock = socket.create_connection(server.address, timeout=5)
+            self.addCleanup(sock.close)
+            sock.sendall(f"POST {route} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: {4 * 1024 * 1024}\r\n\r\n".encode())
+            self.assertTrue(sock.recv(4096).startswith(b"HTTP/1.1 404"), route)
 
 
 class StatusTests(unittest.TestCase):

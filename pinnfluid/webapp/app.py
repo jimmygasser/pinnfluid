@@ -3343,7 +3343,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _read_json_body(self) -> Optional[dict]:
+    _POST_ROUTES = frozenset({"/download_dem", "/upload_dem", "/build_inputs", "/predict", "/predict_rose"})
+
+    def _read_body_at_min_rate(self, length: int) -> Optional[bytes]:
+        """The body, read as it arrives; None (after a 408) when, past the base
+        deadline, the bytes received fall behind PINN_WEBAPP_MIN_UPLOAD_RATE."""
+        base = _request_deadline_s()
+        rate = max(1, _env_nonnegative_int("PINN_WEBAPP_MIN_UPLOAD_RATE", 51200))
+        started = time.monotonic()
+        chunks, received = [], 0
+        while received < length:
+            chunk = self.rfile.read1(min(65536, length - received))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+            elapsed = time.monotonic() - started
+            if base and received < length and elapsed > base and received < rate * (elapsed - base):
+                self._disarm_deadline()
+                self.close_connection = True
+                self._json({"success": False, "error": (
+                    "The upload was too slow. Try again on a faster connection, or upload a "
+                    "smaller or compressed GeoTIFF.")}, status=408)
+                return None
+        return b"".join(chunks)
+
+    def _read_json_body(self, *, min_rate: bool = False) -> Optional[dict]:
         if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
             self._json({
@@ -3374,7 +3399,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         if length == 0:
             return {}
-        raw = self.rfile.read(length)
+        raw = self._read_body_at_min_rate(length) if min_rate else self.rfile.read(length)
+        if raw is None:
+            return None
         if len(raw) != length:
             self._json({"success": False, "error": "incomplete request body"}, status=400)
             return None
@@ -3753,14 +3780,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route is None:
             self.close_connection = True  # the request body was not read
             return
+        if route not in self._POST_ROUTES:
+            self.close_connection = True  # the request body is not read
+            self._disarm_deadline()
+            self.send_error(404)
+            return
         refusal = self._admission_preview(route)
         if refusal:
             self.close_connection = True  # the request body is not read
             self._disarm_deadline()
             self._json({"success": False, "error": refusal[0], "retry_after": refusal[1]}, status=429)
             return
-        self._arm_deadline(_body_deadline_s(self.headers.get("Content-Length")), body=True)
-        body = self._read_json_body()
+        # Only an upload carries a large body: it may take its size at the minimum rate
+        # (and must keep up with that rate); the other routes take small JSON.
+        upload = route == "/upload_dem"
+        deadline = _body_deadline_s(self.headers.get("Content-Length")) if upload else _request_deadline_s()
+        self._arm_deadline(deadline, body=True)
+        body = self._read_json_body(min_rate=upload)
         self._disarm_deadline()  # the request has arrived; the work is not limited
         if body is None:
             return

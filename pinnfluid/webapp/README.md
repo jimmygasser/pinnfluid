@@ -84,7 +84,7 @@ Environment variables (all optional):
 | `PINN_WEBAPP_SOCKET_TIMEOUT_S` | 60 | close a client connection silent for this long (0 disables) |
 | `PINN_WEBAPP_HEADER_DEADLINE_S` | 15 | the request line and headers must arrive within this time (0 disables) |
 | `PINN_WEBAPP_REQUEST_DEADLINE_S` | 60 | the least time a request body may take to arrive (0 disables) |
-| `PINN_WEBAPP_MIN_UPLOAD_RATE` | 51200 | bytes per second: a body may take its size divided by this, if that is longer (a 32 MiB body gets about 11 minutes); slower uploads get 408 |
+| `PINN_WEBAPP_MIN_UPLOAD_RATE` | 51200 | bytes per second an upload (`upload_dem`) must keep up after the base deadline; it may take its size divided by this (a 32 MiB body gets about 11 minutes); slower uploads get 408. Other POST routes take small JSON and keep the base deadline |
 | `PINN_WEBAPP_MAX_CONNECTIONS` | 64 | connections the server holds at once; 503 beyond |
 | `PINN_WEBAPP_STATUS_DETAIL` | 0 | set to 1 to add the torch and CUDA versions to `/status` |
 | `PINN_WEBAPP_JOB_TTL_S` | 3600 | forget finished jobs after this many seconds (at most 200 are kept) |
