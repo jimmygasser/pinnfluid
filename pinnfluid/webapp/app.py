@@ -584,9 +584,30 @@ def _enforce_retention(keep: str) -> None:
 
 
 def _request_deadline_s() -> int:
-    """Seconds a whole request may take to arrive (PINN_WEBAPP_REQUEST_DEADLINE_S,
+    """The least time a request body may take to arrive (PINN_WEBAPP_REQUEST_DEADLINE_S,
     default 60; 0 for none)."""
     return _env_nonnegative_int("PINN_WEBAPP_REQUEST_DEADLINE_S", 60)
+
+
+def _header_deadline_s() -> int:
+    """Seconds the request line and headers may take (PINN_WEBAPP_HEADER_DEADLINE_S,
+    default 15; 0 for none)."""
+    return _env_nonnegative_int("PINN_WEBAPP_HEADER_DEADLINE_S", 15)
+
+
+def _body_deadline_s(content_length) -> int:
+    """Seconds a body of `content_length` bytes may take: at least
+    PINN_WEBAPP_REQUEST_DEADLINE_S, and enough at PINN_WEBAPP_MIN_UPLOAD_RATE bytes
+    per second (default 51200, 50 KiB/s: a 32 MiB body gets about 11 minutes)."""
+    base = _request_deadline_s()
+    if not base:
+        return 0
+    rate = max(1, _env_nonnegative_int("PINN_WEBAPP_MIN_UPLOAD_RATE", 51200))
+    try:
+        length = max(0, int(content_length or 0))
+    except (TypeError, ValueError):
+        length = 0
+    return max(base, math.ceil(length / rate))
 
 
 class LimitedHTTPServer(http.server.ThreadingHTTPServer):
@@ -3170,9 +3191,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     _deadline: Optional[threading.Timer] = None
 
     def handle_one_request(self):
-        """One request; the request line, headers and body must arrive within
-        PINN_WEBAPP_REQUEST_DEADLINE_S in total (a client trickling bytes is cut off)."""
-        self._arm_deadline()
+        """One request. The request line and headers must arrive within
+        PINN_WEBAPP_HEADER_DEADLINE_S, a body within _body_deadline_s(its size):
+        a client trickling bytes is cut off, a slow but steady upload is not."""
+        self._arm_deadline(_header_deadline_s())
         try:
             super().handle_one_request()
         except (BrokenPipeError, ConnectionResetError):  # the client (or the deadline) closed it
@@ -3180,21 +3202,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             self._disarm_deadline()
 
-    def _arm_deadline(self) -> None:
-        seconds = _request_deadline_s()
+    _deadline_lock = threading.Lock()  # one for all handlers: held only for a moment
+
+    def _arm_deadline(self, seconds: int, *, body: bool = False) -> None:
+        self._disarm_deadline()
         if seconds:
-            self._deadline = threading.Timer(seconds, self._deadline_passed)
-            self._deadline.daemon = True
-            self._deadline.start()
+            timer = threading.Timer(seconds, lambda: self._deadline_passed(timer, body))
+            timer.daemon = True
+            self._deadline = timer
+            timer.start()
 
     def _disarm_deadline(self) -> None:
-        timer, self._deadline = self._deadline, None
+        with self._deadline_lock:
+            timer, self._deadline = self._deadline, None
         if timer is not None:
             timer.cancel()
 
-    def _deadline_passed(self) -> None:
+    def _deadline_passed(self, timer, body: bool = False) -> None:
+        with self._deadline_lock:
+            if self._deadline is not timer:  # disarmed meanwhile: the request had arrived
+                return
+            self._deadline = None
         self.close_connection = True
         try:
+            if body:  # say why, for a client that reads the answer before it has sent everything
+                data = json.dumps({"success": False, "error": (
+                    "The upload was too slow. Try again on a faster connection, or upload a "
+                    "smaller or compressed GeoTIFF.")}).encode("utf-8")
+                self.connection.sendall(
+                    b"HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json; charset=utf-8\r\n"
+                    b"Connection: close\r\nContent-Length: " + str(len(data)).encode("ascii")
+                    + b"\r\n\r\n" + data)
             self.connection.shutdown(socket.SHUT_RDWR)  # the pending read ends
         except OSError:
             pass
@@ -3691,6 +3729,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._disarm_deadline()
             self._json({"success": False, "error": refusal[0], "retry_after": refusal[1]}, status=429)
             return
+        self._arm_deadline(_body_deadline_s(self.headers.get("Content-Length")), body=True)
         body = self._read_json_body()
         self._disarm_deadline()  # the request has arrived; the work is not limited
         if body is None:

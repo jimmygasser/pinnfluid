@@ -1315,7 +1315,8 @@ function uploadCustomDEM() {
     document.getElementById('btnUploadDEM').classList.remove('btn-primary');
     document.getElementById('btnUploadDEM').classList.add('btn-success');
   }).catch(function(e) {
-    setStatus('Upload error: '+e, 'err');
+    setStatus('Upload failed: the connection broke or the upload was too slow. Try again, '
+      + 'or upload a smaller or compressed GeoTIFF. (' + e + ')', 'err');
     document.getElementById('btnUploadDEM').disabled = false;
   });
 }

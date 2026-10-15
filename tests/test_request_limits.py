@@ -60,7 +60,7 @@ class DeadlineTests(unittest.TestCase):
         app.Handler.page_html = app._build_html()
         self.server = Server(app)
         self.addCleanup(self.server.close)
-        env = patch.dict(os.environ, {"PINN_WEBAPP_REQUEST_DEADLINE_S": "1"})
+        env = patch.dict(os.environ, {"PINN_WEBAPP_HEADER_DEADLINE_S": "1", "PINN_WEBAPP_REQUEST_DEADLINE_S": "1"})
         env.start()
         self.addCleanup(env.stop)
 
@@ -94,6 +94,77 @@ class DeadlineTests(unittest.TestCase):
     def test_the_deadline_has_a_default(self):
         os.environ.pop("PINN_WEBAPP_REQUEST_DEADLINE_S")
         self.assertEqual(app._request_deadline_s(), 60)
+
+
+class UploadDeadlineTests(unittest.TestCase):
+    """The body may take max(PINN_WEBAPP_REQUEST_DEADLINE_S, Content-Length divided by
+    PINN_WEBAPP_MIN_UPLOAD_RATE): a slow but steady upload of a large DEM arrives;
+    the request line and headers have PINN_WEBAPP_HEADER_DEADLINE_S."""
+
+    def setUp(self):
+        self.server = Server(app)
+        self.addCleanup(self.server.close)
+
+    def env(self, **values):
+        patcher = patch.dict(os.environ, {f"PINN_WEBAPP_{k}": str(v) for k, v in values.items()})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def post_slowly(self, body: bytes, bytes_per_step: int, step_s: float = 0.1) -> bytes:
+        sock = socket.create_connection(self.server.address, timeout=10)
+        self.addCleanup(sock.close)
+        sock.sendall(b"POST /upload_dem HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {len(body)}\r\n\r\n".encode())
+        try:
+            for i in range(0, len(body), bytes_per_step):
+                sock.sendall(body[i:i + bytes_per_step])
+                time.sleep(step_s)
+        except OSError:
+            pass
+        answer = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                answer += chunk
+        except OSError:
+            pass
+        return answer
+
+    def test_the_body_deadline_grows_with_the_size(self):
+        self.env(REQUEST_DEADLINE_S=60, MIN_UPLOAD_RATE=51200)
+        self.assertEqual(app._body_deadline_s(1000), 60)
+        self.assertEqual(app._body_deadline_s(32 * 1024 * 1024), 656)
+        self.assertEqual(app._body_deadline_s(None), 60)
+
+    def test_a_slow_but_steady_upload_arrives(self):
+        self.env(HEADER_DEADLINE_S=5, REQUEST_DEADLINE_S=1, MIN_UPLOAD_RATE=100)
+        body = json.dumps({"domain_name": "x", "pad": " " * 360}).encode()  # about 400 bytes: 4 s at 100 B/s
+        started = time.monotonic()
+        answer = self.post_slowly(body, 20)  # 200 B/s, about 2 s: longer than 1 s, faster than the rate
+        self.assertGreater(time.monotonic() - started, 1.5)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 400"), answer[:120])
+        self.assertIn(b"data_base64", answer)
+
+    def test_an_upload_slower_than_the_rate_gets_408(self):
+        self.env(HEADER_DEADLINE_S=5, REQUEST_DEADLINE_S=1, MIN_UPLOAD_RATE=1000)
+        started = time.monotonic()
+        answer = self.post_slowly(b"{" + b" " * 999, 2, 0.2)  # 10 B/s
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 408"), answer[:120])
+        self.assertIn(b"too slow", answer)
+
+    def test_headers_have_their_own_short_deadline(self):
+        self.env(HEADER_DEADLINE_S=1, REQUEST_DEADLINE_S=30)
+        sock = socket.create_connection(self.server.address, timeout=10)
+        self.addCleanup(sock.close)
+        took = closed_within(sock, 6, b"GET /status HTTP/1.1\r\nHost: x\r\nX-Slow: " + b"a" * 100)
+        self.assertIsNotNone(took)
+        self.assertLess(took, 4)
+
+    def test_the_page_explains_a_failed_upload(self):
+        self.assertIn("the upload was too slow", app._build_html())
 
 
 class ConnectionCapTests(unittest.TestCase):

@@ -82,7 +82,9 @@ Environment variables (all optional):
 | `PINN_WEBAPP_ENABLE_RUN_INDEX` | 0 | expose the shared `/runs` index when set to 1              |
 | `PINN_WEBAPP_STEP_TIMEOUT_S` | 900 | time limit of one terrain step (dem_prep, place_structure, finalize_domain) |
 | `PINN_WEBAPP_SOCKET_TIMEOUT_S` | 60 | close a client connection silent for this long (0 disables) |
-| `PINN_WEBAPP_REQUEST_DEADLINE_S` | 60 | a request (line, headers, body) must arrive within this time in total (0 disables) |
+| `PINN_WEBAPP_HEADER_DEADLINE_S` | 15 | the request line and headers must arrive within this time (0 disables) |
+| `PINN_WEBAPP_REQUEST_DEADLINE_S` | 60 | the least time a request body may take to arrive (0 disables) |
+| `PINN_WEBAPP_MIN_UPLOAD_RATE` | 51200 | bytes per second: a body may take its size divided by this, if that is longer (a 32 MiB body gets about 11 minutes); slower uploads get 408 |
 | `PINN_WEBAPP_MAX_CONNECTIONS` | 64 | connections the server holds at once; 503 beyond |
 | `PINN_WEBAPP_STATUS_DETAIL` | 0 | set to 1 to add the torch and CUDA versions to `/status` |
 | `PINN_WEBAPP_JOB_TTL_S` | 3600 | forget finished jobs after this many seconds (at most 200 are kept) |
