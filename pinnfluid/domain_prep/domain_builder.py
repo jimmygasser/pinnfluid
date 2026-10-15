@@ -57,6 +57,39 @@ STRUCTURE_DIR = ROOT / "single_stl"
 STRUCTURE_TYPES = frozenset(p.name for p in STRUCTURE_DIR.glob("*.stl") if p.is_file())
 
 
+# Time limits: one terrain step (a subprocess), and one HTTP request to swisstopo.
+DEFAULT_STEP_TIMEOUT_S = 900
+HTTP_TIMEOUT_S = 60
+MAX_TILE_BYTES = 200 * 1024 * 1024
+
+
+def _run_step(cmd, step: str, timeout=None):
+    """Run one terrain step as a subprocess, within a time limit.
+
+    The limit is `timeout` seconds, else PINN_WEBAPP_STEP_TIMEOUT_S (default 900).
+    A step that runs out of time is killed and raises RuntimeError. A step that
+    stops on its own ValueError (an input it cannot use, such as a DEM too small
+    for the domain) raises ValueError with that message; any other failure raises
+    RuntimeError with the step's stderr (for the log).
+    """
+    if timeout is None:
+        try:
+            timeout = int(os.environ.get("PINN_WEBAPP_STEP_TIMEOUT_S", DEFAULT_STEP_TIMEOUT_S))
+        except ValueError:
+            timeout = DEFAULT_STEP_TIMEOUT_S
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or None)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{step} did not finish within {timeout} s") from None
+    if r.returncode != 0:
+        marker = "\nValueError: "
+        stderr = "\n" + (r.stderr or "")
+        if marker in stderr:
+            raise ValueError(f"{step}: {stderr.rsplit(marker, 1)[1].strip()}")
+        raise RuntimeError(f"{step} failed: {r.stderr}")
+    return r
+
+
 def structure_stl_path(type_name) -> Path:
     """The shipped STL of a structure type ("cube.stl"); ValueError for anything
     else, so a request cannot name a file outside single_stl/."""
@@ -1513,7 +1546,7 @@ def query_stac_tiles(west, south, east, north, resolution="2"):
     while url:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as e:
             print(f"[ERROR] STAC query failed: {e}", file=sys.stderr)
@@ -1563,11 +1596,31 @@ def download_tiles(tiles, output_dir):
             downloaded += 1; continue
         print(f"  [{i}/{len(tiles)}] Downloading {tile['name']} ...")
         try:
-            urllib.request.urlretrieve(tile["href"], filepath)
+            _download(tile["href"], filepath)
             downloaded += 1
         except Exception as e:
             print(f"    FAILED: {e}"); failed += 1
     return downloaded, failed
+
+def _download(url, filepath):
+    """GET `url` into `filepath`, within HTTP_TIMEOUT_S per read and MAX_TILE_BYTES."""
+    tmp = filepath + ".part"
+    try:
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as resp, open(tmp, "wb") as out:
+            total = 0
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TILE_BYTES:
+                    raise ValueError(f"tile larger than {MAX_TILE_BYTES} bytes")
+                out.write(chunk)
+        os.replace(tmp, filepath)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
 
 def wgs84_to_lv95(west, south, east, north):
     tf = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
@@ -1851,9 +1904,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
         "--height", str(domain_size),
         "--stl",
     ] + pivot_args
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"dem_prep failed: {r.stderr}")
+    r = _run_step(cmd, "dem_prep")
     print(r.stdout[-200:] if len(r.stdout) > 200 else r.stdout)
 
     # Rename terrain.stl -> ground.stl
@@ -1902,9 +1953,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
                 "--slope-align-min-deg", str(placement_slope_align_min_deg),
                 "--slope-align-jitter-deg", str(placement_slope_align_jitter_deg),
             ])
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"place_structure failed: {r.stderr}")
+        r = _run_step(cmd, "place_structure")
         print(r.stdout[-300:] if len(r.stdout) > 300 else r.stdout)
 
         struct_stl_path = placed_dir / "structures_placed.stl"
@@ -1948,9 +1997,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
                     "--slope-align-min-deg", str(placement_slope_align_min_deg),
                     "--slope-align-jitter-deg", str(placement_slope_align_jitter_deg),
                 ])
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0:
-                raise RuntimeError(f"place_structure (grid) failed: {r.stderr}")
+            r = _run_step(cmd, "place_structure (grid)")
             print(r.stdout[-300:] if len(r.stdout) > 300 else r.stdout)
 
             struct_stl_path = placed_dir / "structures_placed.stl"
@@ -2033,9 +2080,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
     if struct_stl_path and struct_stl_path.exists():
         cmd.extend(["--structure-stls", str(struct_stl_path)])
 
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"finalize_domain failed: {r.stderr}")
+    r = _run_step(cmd, "finalize_domain")
     print(r.stdout[-200:] if len(r.stdout) > 200 else r.stdout)
 
     # Compute per-structure bounds from known placement positions + STL size

@@ -260,11 +260,11 @@ class StacHostTests(unittest.TestCase):
 
     def test_downloads_refuse_other_hosts(self):
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(domain_builder.urllib.request, "urlretrieve") as retrieve:
+                patch.object(domain_builder.urllib.request, "urlopen") as fetch:
             downloaded, failed = domain_builder.download_tiles(
                 [{"name": "swissalti3d_x.tif", "href": "https://evil.example/x.tif"}], tmp)
         self.assertEqual((downloaded, failed), (0, 1))
-        retrieve.assert_not_called()
+        fetch.assert_not_called()
 
 
 @unittest.skipIf(rasterio is None, "needs rasterio")

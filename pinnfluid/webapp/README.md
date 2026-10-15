@@ -79,6 +79,11 @@ Environment variables (all optional):
 | `PINN_WEBAPP_MAX_DOMAIN_M` | 3000 | maximum terrain width and height                            |
 | `PINN_WEBAPP_MAX_SINGLE_STRUCTURES` | 10 | maximum individually placed structures                 |
 | `PINN_WEBAPP_ENABLE_RUN_INDEX` | 0 | expose the shared `/runs` index when set to 1              |
+| `PINN_WEBAPP_STEP_TIMEOUT_S` | 900 | time limit of one terrain step (dem_prep, place_structure, finalize_domain) |
+| `PINN_WEBAPP_SOCKET_TIMEOUT_S` | 60 | close a client connection silent for this long (0 disables) |
+| `PINN_WEBAPP_JOB_TTL_S` | 3600 | forget finished jobs after this many seconds (at most 200 are kept) |
+| `PINN_WEBAPP_WORK_TTL_S` | 21600 | remove DEMs, left-over workspaces and wind-rose summaries unused for this long (0 disables) |
+| `PINN_WEBAPP_MAX_DEMS` | 50 | keep at most this many DEM directories, newest first (0 disables) |
 | `PINN_DEVICE`           | auto    | force `cpu` or `cuda`                                         |
 | `PINN_WEBAPP_GITHUB_URL`| project repository | the "About / GitHub" link in the app header      |
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
@@ -127,7 +132,10 @@ stored under a namespace derived from it, so results, terrain and jobs
 domain name (they answer 404). The past-run index, disabled by default, lists the
 session's own runs only. Results still live only as long as the server keeps
 them (`PINN_WEBAPP_MAX_RUNS`, `PINN_WEBAPP_MAX_GB`). There is no
-CSRF protection and the in-process limits are not DDoS-grade. Follow
+CSRF protection and the in-process limits are not DDoS-grade. Terrain steps,
+tile downloads (`data.geo.admin.ch` only) and idle connections have time limits.
+Clients see validation messages, or a generic message with a reference whose
+traceback is in the server log; responses carry no server paths. Follow
 `DEPLOY.md` before exposing the app publicly; use authentication or Cloud Armor
 if stronger per-user enforcement becomes necessary.
 Checkpoints are loaded with `torch.load(weights_only=False)` — only load

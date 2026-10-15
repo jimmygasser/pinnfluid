@@ -217,10 +217,10 @@ class WorkDirFlowTests(unittest.TestCase):
         self.assertTrue(out["upload"][1]["success"], out)
         self.assertEqual(out["build"][0], 200, out)
         self.assertTrue(out["build"][1]["success"], out)
-        self.assertTrue(out["build"][1]["cfd_dir"].startswith(str(work / "workspace")), out)
+        self.assertNotIn("cfd_dir", out["build"][1])  # no server paths in responses
         case = f"{out['namespace']}_wd-case"  # the session's name for it
         self.assertIn(os.path.join("dem", case, "dem_cropped.tif"), written)
-        # the build happened in workspace/ (cfd_dir above), which predict cleans up
+        # the build happened in workspace/, which predict cleans up
         self.assertEqual([p for p in written if p.startswith("workspace" + os.sep)], [], written)
         self.assertEqual(out["job"], ["done", None], out)
         self.assertIn(os.path.join("results", case, "report.pdf"), written)

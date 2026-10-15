@@ -118,6 +118,11 @@ class SessionTestCase(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(self.tmp.cleanup)
+        limits = patch.dict(os.environ, {"PINN_WEBAPP_MAX_ACTIVE_JOBS": "0",
+                                         "PINN_WEBAPP_RATE_LIMIT_JOBS": "0",
+                                         "PINN_WEBAPP_RATE_LIMIT_PREP": "0"})
+        limits.start()
+        self.addCleanup(limits.stop)
         with app._JOBS_LOCK:
             app._JOBS.clear()
             app._JOB_SUBMISSIONS.clear()

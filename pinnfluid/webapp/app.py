@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import base64 as _b64
 import binascii
+import contextlib
 import copy
 import hashlib
 import html as _html
@@ -55,7 +56,7 @@ for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_pre
 # or where PINN_WEBAPP_RESULTS_DIR points, e.g. a mounted persistent volume (a
 # Cloud Storage bucket) when deploying in a container whose local disk is
 # ephemeral. DEM downloads and uploads go to DEM_ROOT.
-from work_dir import DEM_ROOT, RESULTS_DIR  # type: ignore  noqa: E402
+from work_dir import DEM_ROOT, RESULTS_DIR, WORKSPACE  # type: ignore  noqa: E402
 
 # URL prefix the app is served under behind a gateway (PINN_WEBAPP_BASE_PATH,
 # e.g. /pinnfluid): requests outside it get 404 and the prefix is stripped before
@@ -307,6 +308,142 @@ def _env_mebibytes(name: str, default: int) -> int:
     return max(1, _env_nonnegative_int(name, default)) * 1024 * 1024
 
 
+# ---------------------------------------------------------------------------
+# Client errors: validation messages, or a reference; details only in the log
+# ---------------------------------------------------------------------------
+# An absolute path of two or more segments (not "m/s" or "QGIS/GDAL").
+_PATH_RE = re.compile(r"(?<![\w.])(?:/[\w.@+-]+){2,}/?")
+# Keys of internal results that name server paths; never sent to a client.
+_SERVER_PATH_KEYS = frozenset({"case_dir", "cfd_dir", "saved_dir", "path"})
+
+
+def _redact_paths(text: str) -> str:
+    return _PATH_RE.sub("<path>", text)
+
+
+def _client_error(exc: BaseException) -> tuple[dict, int]:
+    """(JSON payload, status) for an exception at the client boundary.
+
+    A ValueError is a problem with the request or its input and its message is
+    shown, without server paths (400). Anything else answers a generic message
+    with a reference (500); the traceback goes to the log under that reference.
+    """
+    if isinstance(exc, ValueError):
+        return {"success": False, "error": _redact_paths(str(exc))[:1000]}, 400
+    ref = uuid.uuid4().hex[:10]
+    print(f"[error {ref}] {type(exc).__name__}", file=sys.stderr, flush=True)
+    traceback.print_exception(exc, file=sys.stderr)
+    return {
+        "success": False,
+        "error": f"Internal error (reference {ref}). Please try again; if it keeps "
+                 "happening, report the reference.",
+        "reference": ref,
+    }, 500
+
+
+def _client_result(value):
+    """A result for the client: without the keys that hold server paths."""
+    if isinstance(value, dict):
+        return {k: _client_result(v) for k, v in value.items() if k not in _SERVER_PATH_KEYS}
+    if isinstance(value, list):
+        return [_client_result(v) for v in value]
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Pruning: finished jobs, and what dem/, workspace/ and results/ keep
+# ---------------------------------------------------------------------------
+_clock = time.time  # replaced by tests
+_MAX_FINISHED_JOBS = 200
+# Domain names in use by a running operation (counts), never pruned. A wind-rose
+# job's sector directories (<name>_rXXX) are covered by their base name.
+_BUSY: dict = {}
+
+
+def _busy_add(name: str) -> None:
+    with _JOBS_LOCK:
+        _BUSY[name] = _BUSY.get(name, 0) + 1
+
+
+def _busy_remove(name: str) -> None:
+    with _JOBS_LOCK:
+        left = _BUSY.get(name, 1) - 1
+        if left > 0:
+            _BUSY[name] = left
+        else:
+            _BUSY.pop(name, None)
+
+
+@contextlib.contextmanager
+def _busy(name: str):
+    _busy_add(name)
+    try:
+        yield
+    finally:
+        _busy_remove(name)
+
+
+def _prune_jobs_locked() -> None:
+    """Drop finished jobs older than PINN_WEBAPP_JOB_TTL_S (default 3600 s; a
+    result is fetched by the page within seconds) and keep at most
+    _MAX_FINISHED_JOBS of them. Queued and running jobs stay."""
+    ttl = _env_nonnegative_int("PINN_WEBAPP_JOB_TTL_S", 3600)
+    now = _clock()
+    finished = sorted(
+        (j.get("finished", j["created"]), jid)
+        for jid, j in _JOBS.items() if j.get("state") in ("done", "error")
+    )
+    for i, (t, jid) in enumerate(finished):
+        if (ttl and now - t > ttl) or i < len(finished) - _MAX_FINISHED_JOBS:
+            del _JOBS[jid]
+
+
+def _prune_work_dirs() -> None:
+    """Remove what no running operation uses and is older than
+    PINN_WEBAPP_WORK_TTL_S (default 21600 s): DEM directories, left-over workspace
+    cases, and result directories without saved inputs (wind-rose summaries; runs
+    with inputs follow PINN_WEBAPP_MAX_RUNS/MAX_GB). Keep at most
+    PINN_WEBAPP_MAX_DEMS (default 50) DEM directories, newest first. Best effort."""
+    ttl = _env_nonnegative_int("PINN_WEBAPP_WORK_TTL_S", 21600)
+    max_dems = _env_nonnegative_int("PINN_WEBAPP_MAX_DEMS", 50)
+    now = _clock()
+    with _JOBS_LOCK:
+        busy = tuple(_BUSY)
+
+    def in_use(name: str) -> bool:
+        return any(name == b or name.startswith(b + "_") for b in busy)
+
+    def entries(root: Path) -> list:
+        try:
+            found = [(d.stat().st_mtime, d) for d in root.iterdir() if d.is_dir()]
+        except OSError:
+            return []
+        return sorted((e for e in found if not in_use(e[1].name)), key=lambda e: e[0])
+
+    def drop(d: Path) -> None:
+        shutil.rmtree(d, ignore_errors=True)
+
+    roots = [DEM_ROOT, WORKSPACE / "cases" / "singlestructures",
+             WORKSPACE / "cfd" / "singlestructures"]
+    for root in roots:
+        for mtime, d in entries(root):
+            if ttl and now - mtime > ttl:
+                drop(d)
+    if max_dems:
+        dems = entries(DEM_ROOT)
+        for _, d in dems[:max(0, len(dems) - max_dems)]:
+            drop(d)
+    for mtime, d in entries(RESULTS_DIR):
+        if ttl and now - mtime > ttl and not (d / "inputs").exists():
+            drop(d)
+
+
+def _socket_timeout_from_env() -> Optional[int]:
+    """Seconds a client connection may stay silent (PINN_WEBAPP_SOCKET_TIMEOUT_S,
+    default 60; 0 for none)."""
+    return _env_nonnegative_int("PINN_WEBAPP_SOCKET_TIMEOUT_S", 60) or None
+
+
 def _active_jobs_locked() -> int:
     return sum(j.get("state") in ("queued", "running") for j in _JOBS.values())
 
@@ -449,6 +586,7 @@ def _job_admit_and_create(kind: str, session: Optional[str] = None) -> tuple[Opt
     window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
     now = time.time()
     with _JOBS_LOCK:
+        _prune_jobs_locked()
         active = _active_jobs_locked() + _PREP_ACTIVE
         if max_active and active >= max_active:
             return None, "A prediction is already running. Try again when it finishes.", 30
@@ -465,7 +603,7 @@ def _job_admit_and_create(kind: str, session: Optional[str] = None) -> tuple[Opt
         jid = uuid.uuid4().hex[:12]
         _JOBS[jid] = {
             "id": jid, "kind": kind, "state": "queued", "session": session,
-            "message": "queued…", "created": time.time(),
+            "message": "queued…", "created": _clock(),
             "result": None, "error": None,
         }
     return jid, "", 0
@@ -477,8 +615,14 @@ def _job_update(jid: str, **kw) -> None:
             _JOBS[jid].update(kw)
 
 
+def _job_finish(jid: str, state: str, *, result=None, error=None) -> None:
+    _job_update(jid, state=state, result=result, error=error, message=state,
+                finished=_clock())
+
+
 def _job_get(jid: str) -> Optional[dict]:
     with _JOBS_LOCK:
+        _prune_jobs_locked()
         j = _JOBS.get(jid)
         return dict(j) if j else None
 
@@ -493,11 +637,10 @@ def _job_start(jid: str, fn: Callable[[Callable[[str], None]], dict]) -> None:
         with _PREDICT_GATE:
             _job_update(jid, state="running", message="starting…")
             try:
-                result = fn(_progress)
-                _job_update(jid, state="done", result=result, message="done")
+                result = _client_result(fn(_progress))
+                _job_finish(jid, "done", result=result)
             except Exception as e:  # noqa: BLE001 - job boundary
-                traceback.print_exc()
-                _job_update(jid, state="error", error=f"{type(e).__name__}: {e}", message="error")
+                _job_finish(jid, "error", error=_client_error(e)[0]["error"])
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -1715,6 +1858,9 @@ def _run_build_inputs(body: dict) -> dict:
         pass
     if custom_center:
         _apply_custom_center(name, custom_center)
+    if not (_case_paths(name)["dem_dir"] / "dem_cropped.tif").exists():
+        raise ValueError("There is no terrain for this domain (it may have expired): "
+                         "confirm the terrain again.")
     inputs = build_inputs(**kw)
     # Record what these inputs were built from (see _body_signature).
     try:
@@ -2741,6 +2887,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     dem_root = str(DEM_ROOT)
     page_html: str = ""
     base_path: str = ""  # set by main() from PINN_WEBAPP_BASE_PATH
+    timeout = 60  # seconds a connection may stay silent; main() reads the setting
     # Per request (one handler serves every request of a keep-alive connection).
     _namespace: Optional[str] = None  # this session's namespace, once looked up
     _new_session_id: Optional[str] = None  # sent as Set-Cookie with the response
@@ -2863,7 +3010,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         return payload
 
+    def _fail(self, exc: BaseException, *, missing_is_404: bool = False) -> None:
+        """Answer an exception: 404 for a missing run (result routes), else
+        _client_error (validation message, or a reference)."""
+        if missing_is_404 and isinstance(exc, FileNotFoundError):
+            self._json({"success": False, "error": "not found"}, status=404)
+            return
+        payload, status = _client_error(exc)
+        self._json(payload, status=status)
+
+    def _prune(self) -> None:
+        try:
+            _prune_work_dirs()
+        except Exception as exc:  # noqa: BLE001 - never fail a request on pruning
+            _client_error(exc)
+
     def _admit_preparation(self) -> bool:
+        self._prune()
         ok, message, retry_after = _prep_admit()
         if ok:
             return True
@@ -2981,8 +3144,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 n = float(qs["n"][0])
                 lng, lat = lv95_to_wgs84_point(e, n)
                 self._json({"lat": lat, "lng": lng})
+            except (KeyError, IndexError, ValueError):
+                self._json({"error": "e and n must be numbers"}, status=400)
             except Exception as ex:
-                self._json({"error": str(ex)}, status=400)
+                self._fail(ex)
             return
         if path == "/job_status":
             qs = parse_qs(urlparse(self.path).query)
@@ -3014,7 +3179,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as ex:
-                self._json({"success": False, "error": str(ex)}, status=404)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/runs" and _env_flag("PINN_WEBAPP_ENABLE_RUN_INDEX", False):
             try:
@@ -3025,8 +3190,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as ex:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(ex)}, status=500)
+                self._fail(ex)
             return
         if path == "/download_zip":
             qs = parse_qs(urlparse(self.path).query)
@@ -3046,7 +3210,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as ex:
-                self._json({"success": False, "error": str(ex)}, status=404)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/download_vtk":
             qs = parse_qs(urlparse(self.path).query)
@@ -3063,8 +3227,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     allow_gzip=False,
                 )
             except Exception as ex:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(ex)}, status=404)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/download_npz":
             qs = parse_qs(urlparse(self.path).query)
@@ -3084,7 +3247,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as ex:
-                self._json({"success": False, "error": str(ex)}, status=404)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/download_pdf":
             qs = parse_qs(urlparse(self.path).query)
@@ -3104,7 +3267,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as ex:
-                self._json({"success": False, "error": str(ex)}, status=404)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/map":
             qs = parse_qs(urlparse(self.path).query)
@@ -3117,11 +3280,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _ensure_map_html(domain),
                     content_type="text/html; charset=utf-8",
                 )
-            except FileNotFoundError as ex:  # no such run in this session
-                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(ex)}, status=500)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/view_3d" or path == "/download_3d":
             qs = parse_qs(urlparse(self.path).query)
@@ -3141,11 +3301,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     content_disposition=disposition,
                     allow_gzip=path != "/download_3d",
                 )
-            except FileNotFoundError as ex:  # no such run in this session
-                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(ex)}, status=500)
+                self._fail(ex, missing_is_404=True)
             return
         if path == "/view_3d_structure" or path == "/download_3d_structure":
             qs = parse_qs(urlparse(self.path).query)
@@ -3180,11 +3337,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     content_disposition=disposition,
                     allow_gzip=path != "/download_3d_structure",
                 )
-            except FileNotFoundError as ex:  # no such run in this session
-                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(ex)}, status=500)
+                self._fail(ex, missing_is_404=True)
             return
         self.send_error(404)
 
@@ -3199,6 +3353,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if route == "/download_dem":
             admitted = False
+            busy = contextlib.ExitStack()
             try:
                 west, south, east, north = _validate_dem_bounds(body)
                 name = self._domain(body.get("domain_name", "unnamed"))
@@ -3208,6 +3363,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not self._admit_preparation():
                     return
                 admitted = True
+                busy.enter_context(_busy(name))
                 output_dir = os.path.join(self.dem_root, name)
 
                 print(f"\n[DEM] {name}: W={west:.5f} S={south:.5f} E={east:.5f} N={north:.5f}", flush=True)
@@ -3231,16 +3387,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dump(sel, f, indent=2)
                 self._json({"success": True, "dem_size": f"{w_m:.0f}x{h_m:.0f} m", "downloaded": downloaded})
             except Exception as e:
-                print(f"[ERROR] {e}", flush=True)
-                traceback.print_exc()
-                self._json({"success": False, "error": str(e)}, status=400)
+                self._fail(e)
             finally:
+                busy.close()
                 if admitted:
                     _prep_release()
             return
 
         if route == "/upload_dem":
             admitted = False
+            busy = contextlib.ExitStack()
             try:
                 name = self._domain(body.get("domain_name", ""))
                 data_b64 = body.get("data_base64") or ""
@@ -3265,6 +3421,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not self._admit_preparation():
                     return
                 admitted = True
+                busy.enter_context(_busy(name))
                 # Wipe any prior dem/<name>/ so a stale Swiss DEM doesn't shadow.
                 try:
                     cleanup_case(name)
@@ -3284,9 +3441,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "dem_size": f"{info['width_m']:.0f}x{info['height_m']:.0f} m (custom)",
                 })
             except Exception as e:
-                traceback.print_exc()
-                self._json({"success": False, "error": str(e)}, status=400)
+                self._fail(e)
             finally:
+                busy.close()
                 if admitted:
                     _prep_release()
             return
@@ -3294,6 +3451,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route == "/build_inputs":
             name = ""
             admitted = False
+            busy = contextlib.ExitStack()
             try:
                 name = self._domain(body.get("domain_name", ""))
                 body = dict(body, domain_name=name)
@@ -3301,19 +3459,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not self._admit_preparation():
                     return
                 admitted = True
-                self._json(_run_build_inputs(body))
+                busy.enter_context(_busy(name))
+                self._json(_client_result(_run_build_inputs(body)))
             except Exception as e:
-                traceback.print_exc()
                 if name:
                     # Keep the DEM: one transient build error must not force a
                     # full terrain re-download.
                     try: cleanup_case(name, keep_dem=True)
                     except Exception: pass
-                self._json({
-                    "success": False,
-                    "error": f"{type(e).__name__}: {e}",
-                }, status=400)
+                self._fail(e)
             finally:
+                busy.close()
                 if admitted:
                     _prep_release()
             return
@@ -3327,9 +3483,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if is_rose:
                     _parse_rose_directions(body)
             except ValueError as e:
-                self._json({"success": False, "error": str(e)}, status=400)
+                self._fail(e)
                 return
             kind = "rose" if is_rose else "predict"
+            self._prune()
             jid, message, retry_after = _job_admit_and_create(kind, session=self._session())
             if jid is None:
                 self._json({
@@ -3349,7 +3506,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     except Exception:
                         pass
                     raise
+                finally:
+                    _busy_remove(_name)
 
+            _busy_add(name)  # from now until the job ends: not pruned
             _job_start(jid, _fn)
             self._json({"job_id": jid})
             return
@@ -3388,6 +3548,7 @@ def main() -> None:
         Handler.base_path = _base_path_from_env()
     except ValueError as exc:
         ap.error(str(exc))
+    Handler.timeout = _socket_timeout_from_env()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     Handler.page_html = _build_html()
 
