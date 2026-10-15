@@ -520,6 +520,7 @@ def export_empty_case(
     edge_cells: int = 1,
     z_cap_offset: float | None = None,
     overwrite: bool = False,
+    repo_root: Path = ROOT,
 ) -> dict:
     """Lite export for an empty domain (no CFD).
 
@@ -528,10 +529,11 @@ def export_empty_case(
     `is_empty=True` marker. Output is loadable by the existing
     data_loader.CaseRepository (just point it at data/empty_domains/).
 
-    No ROI is exported. Empty cases are global-only.
+    No ROI is exported. Empty cases are global-only. `repo_root` is the
+    directory holding dem/<case>/ (the web app passes its DEM root's parent).
     """
     case_dir = case_dir.resolve()
-    case_meta = find_case_sidecars(case_dir, ROOT)
+    case_meta = find_case_sidecars(case_dir, repo_root)
     category = case_meta["category"]
     case_name = case_meta["case_name"]
 

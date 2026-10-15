@@ -13,8 +13,9 @@ Pipeline:
      meta.json is then patched with `roi_paths` so the downstream plotting code
      can discover the ROIs.
 
-All intermediate artefacts live under scripts/predict_web/workspace/ and are
-cleaned up after prediction finishes (see cleanup_case).
+All intermediate artefacts live under WORKSPACE (webapp/workspace/, or
+workspace/ below PINN_WEBAPP_WORK_DIR, see work_dir.py) and are cleaned up after
+prediction finishes (see cleanup_case).
 """
 
 from __future__ import annotations
@@ -28,12 +29,12 @@ from typing import Any, Optional
 import numpy as np
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-ROOT = SCRIPTS_DIR.parent
-WORKSPACE = Path(__file__).resolve().parent / "workspace"
 
 for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_prep"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
+
+from work_dir import DEM_ROOT, WORKSPACE  # type: ignore  noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def _case_paths(domain_name: str) -> dict:
     safe = domain_name.strip().replace("/", "_").replace("\\", "_")
     if not safe:
         raise ValueError("domain_name is empty")
-    dem_root = ROOT / "dem"
+    dem_root = DEM_ROOT
     case_root = WORKSPACE / "cases" / "singlestructures"
     cfd_root = WORKSPACE / "cfd" / "singlestructures"
     return {
@@ -132,6 +133,7 @@ def export_binary_inputs(domain_name: str, *, dx: float = 30.0, dy: float = 30.0
         dy=float(dy),
         edge_cells=1,
         overwrite=True,
+        repo_root=DEM_ROOT.parent,
     )
     return paths["cfd_dir"]
 
@@ -201,7 +203,7 @@ def export_roi_inputs(
     case_dir = paths["case_dir"]
     cfd_dir = paths["cfd_dir"]
 
-    case_meta = find_case_sidecars(case_dir, ROOT)
+    case_meta = find_case_sidecars(case_dir, DEM_ROOT.parent)
     structure_bounds, grid_info, n_structures, source = preferred_structure_metadata(case_meta)
     if not structure_bounds or case_meta["structure_stl"] is None:
         return []

@@ -39,11 +39,16 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 ROOT = SCRIPTS_DIR.parent
-# Saved runs live here. Override with PINN_WEBAPP_RESULTS_DIR to point at a
-# mounted persistent volume (e.g. a Cloud Storage bucket) when deploying in a
-# container whose local disk is ephemeral.
-RESULTS_DIR = Path(os.environ.get(
-    "PINN_WEBAPP_RESULTS_DIR", Path(__file__).resolve().parent / "results"))
+
+for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_prep"):
+    if str(extra) not in sys.path:
+        sys.path.insert(0, str(extra))
+
+# Saved runs live in RESULTS_DIR: below PINN_WEBAPP_WORK_DIR (see work_dir.py),
+# or where PINN_WEBAPP_RESULTS_DIR points, e.g. a mounted persistent volume (a
+# Cloud Storage bucket) when deploying in a container whose local disk is
+# ephemeral. DEM downloads and uploads go to DEM_ROOT.
+from work_dir import DEM_ROOT, RESULTS_DIR  # type: ignore  noqa: E402
 
 # URL prefix the app is served under behind a gateway (PINN_WEBAPP_BASE_PATH,
 # e.g. /pinnfluid): requests outside it get 404 and the prefix is stripped before
@@ -73,10 +78,6 @@ def _base_path_from_env() -> str:
 GITHUB_URL = os.environ.get(
     "PINN_WEBAPP_GITHUB_URL", "https://github.com/jimmygasser/pinnfluid"
 )
-
-for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_prep"):
-    if str(extra) not in sys.path:
-        sys.path.insert(0, str(extra))
 
 from domain_builder import (  # type: ignore  noqa: E402
     HTML_TEMPLATE as BUILDER_HTML,
@@ -1847,7 +1848,7 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
     # 3D viewer can be (re)generated later without rerunning the model. Stale
     # 3D viewer HTML from a previous run of the same name is dropped first.
     _invalidate_3d_cache(name)
-    selection_path = ROOT / "dem" / name / "selection.json"
+    selection_path = DEM_ROOT / name / "selection.json"
     try:
         save_inputs_and_predictions(
             RESULTS_DIR,
@@ -2102,7 +2103,7 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
     dirs = _parse_rose_directions(body)
     n_dirs = len(dirs)
     model_id = str(body.get("model") or "").strip() or None
-    base_dem = ROOT / "dem" / name
+    base_dem = DEM_ROOT / name
     geometry_reference_dir = float(body.get("wind_from", dirs[0])) % 360.0
     governing_rule = (
         "Custom directions: the first valid direction is user-selected as governing."
@@ -2114,7 +2115,7 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
     for i, d in enumerate(dirs):
         sector_name = f"{name}_r{int(round(d)) % 360:03d}"
         _p(f"direction {d:.0f}° ({i + 1}/{n_dirs})…")
-        sector_dem = ROOT / "dem" / sector_name
+        sector_dem = DEM_ROOT / sector_name
         try:
             if base_dem.exists() and not sector_dem.exists():
                 shutil.copytree(base_dem, sector_dem)
@@ -2605,7 +2606,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "pinnfluid"
     sys_version = ""
-    dem_root = str(ROOT / "dem")
+    dem_root = str(DEM_ROOT)
     page_html: str = ""
     base_path: str = ""  # set by main() from PINN_WEBAPP_BASE_PATH
 

@@ -82,7 +82,8 @@ Environment variables (all optional):
 | `PINN_WEBAPP_GITHUB_URL`| project repository | the "About / GitHub" link in the app header      |
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
 | `PORT`                  | 8779    | listen port (Cloud Run / Docker set this automatically)       |
-| `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container     |
+| `PINN_WEBAPP_WORK_DIR` | (checkout) | absolute dir for everything the app writes: `dem/`, `workspace/`, `results/` (the source tree can then be read-only) |
+| `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container (overrides `<work dir>/results`) |
 | `PINN_WEBAPP_BASE_PATH` | (root) | URL prefix behind a gateway, e.g. `/pinnfluid`: the app answers only under it (404 elsewhere) |
 
 `models.yaml` (next to `app.py`) is the file equivalent of `PINN_WEBAPP_MODELS`
@@ -95,7 +96,9 @@ PINN_WEBAPP_MODELS=hybrid-cascade-292d-pinn python pinnfluid/webapp/app.py
 ## Storage
 
 Each saved run keeps ~50–100 MB under `webapp/results/<domain>/` (inputs +
-predictions + plots + PDF). DEM downloads are cached under `dem/`. Old runs are
+predictions + plots + PDF). DEM downloads are cached under `dem/`. With
+`PINN_WEBAPP_WORK_DIR` set, `dem/`, `workspace/` and `results/` are below that
+directory instead and nothing is written into the checkout. Old runs are
 pruned automatically to stay within `PINN_WEBAPP_MAX_RUNS` and
 `PINN_WEBAPP_MAX_GB` (the run just produced is never pruned). Both `results/`
 and `workspace/` are git-ignored. The 3D viewers and the map load plotly.js from
