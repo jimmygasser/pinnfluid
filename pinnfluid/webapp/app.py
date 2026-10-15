@@ -720,6 +720,9 @@ def _invalidate_3d_cache(name: str) -> None:
                 p.unlink()
             except OSError:
                 pass
+    # the cached exports, and the export directories of older versions
+    for sub in ("exports", "vtk", "npz"):
+        shutil.rmtree(base / sub, ignore_errors=True)
 
 
 def _companion_model_id(primary_id: Optional[str]) -> Optional[str]:
@@ -2691,32 +2694,104 @@ Local frame:
 """
 
 
-def _render_vtk_zip(name: str) -> Path:
+# ---------------------------------------------------------------------------
+# On-demand exports: built once per run, atomically, behind an admission check
+# ---------------------------------------------------------------------------
+class ExportBusy(Exception):
+    """No export build may start now (per-session or global limit); 429."""
+
+
+_EXPORTS_LOCK = threading.Lock()
+_EXPORT_BUILDS: dict = {}  # (run name, kind) -> threading.Event, for builds in progress
+
+
+def _admit_export_locked(name: str) -> None:
+    """Refuse a new build beyond PINN_WEBAPP_MAX_EXPORT_BUILDS (default 2) at once,
+    or PINN_WEBAPP_MAX_EXPORT_BUILDS_PER_SESSION (default 1) for one session."""
+    max_global = _env_nonnegative_int("PINN_WEBAPP_MAX_EXPORT_BUILDS", 2)
+    max_session = _env_nonnegative_int("PINN_WEBAPP_MAX_EXPORT_BUILDS_PER_SESSION", 1)
+    running = [run for run, _ in _EXPORT_BUILDS]
+    if max_global and len(running) >= max_global:
+        raise ExportBusy()
+    prefix = name[:17] if _NAMESPACE_PREFIX_RE.match(name) else None
+    if max_session and prefix and sum(r.startswith(prefix) for r in running) >= max_session:
+        raise ExportBusy()
+
+
+def _cached_export(name: str, kind: str, build: Callable[[Path], None]) -> Path:
+    """exports/<name>_<kind>.zip of a run, built by `build(path)` on first use.
+
+    The first request builds it (after the admission check) and renames it into
+    place; requests for the same archive meanwhile wait for that build and get the
+    same file; later ones are served from the cache, without admission. A new
+    prediction of the run removes the cache (_invalidate_3d_cache).
+    """
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
-    saved = load_saved_inputs(RESULTS_DIR, name)
-    vtk_dir = RESULTS_DIR / name / "vtk"
-    info = export_prediction_vtk(
-        vtk_dir,
-        domain_name=_display_name(name),
-        global_bundle=saved["bundle"],
-        global_pred_flow=saved["pred_flow"],
-        roi_bundles=saved.get("roi_bundles"),
-        roi_pred_flows=saved.get("roi_preds"),
-    )
-    if not info["files"]:
-        skipped_summary = ", ".join(
-            f"{s['label']} ({s['n_points']/1e6:.1f}M pts)" for s in info["skipped"]
-        )
-        raise RuntimeError(f"No VTK files produced (all skipped: {skipped_summary or 'none'})")
-    export_dir = RESULTS_DIR / name / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = export_dir / f"{name}_vtk.zip"
-    tmp_path = export_dir / f".{name}_vtk.{uuid.uuid4().hex}.tmp"
+    final = RESULTS_DIR / name / "exports" / f"{name}_{kind}.zip"
+    key = (name, kind)
+    with _EXPORTS_LOCK:
+        if final.is_file():
+            return final
+        event = _EXPORT_BUILDS.get(key)
+        owner = event is None
+        if owner:
+            _admit_export_locked(name)
+            event = _EXPORT_BUILDS[key] = threading.Event()
+    if owner:
+        try:
+            build(final)
+        finally:
+            with _EXPORTS_LOCK:
+                _EXPORT_BUILDS.pop(key, None)
+            event.set()
+        return final
+    event.wait()
+    if final.is_file():
+        return final
+    raise RuntimeError(f"the {kind} export of {name!r} failed")
+
+
+def _zip_export(final: Path, export: Callable[[Path], dict], extra=None) -> None:
+    """Run `export(dir)` into a temporary directory and zip its files to `final`
+    through a temporary file and a rename, so no reader sees a partial archive."""
+    final.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    work = final.parent / f".build-{token}"
+    tmp_zip = final.parent / f".{final.name}.{token}.tmp"
     try:
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        info = export(work)
+        if not info["files"]:
+            skipped_summary = ", ".join(
+                f"{s['label']} ({s['n_points']/1e6:.1f}M pts)" for s in info.get("skipped", [])
+            )
+            raise RuntimeError(f"No export files produced (all skipped: {skipped_summary or 'none'})")
+        with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in info["files"]:
                 zf.write(p, arcname=Path(p).name)
+            if extra:
+                extra(zf)
+        tmp_zip.replace(final)
+    finally:
+        tmp_zip.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _render_vtk_zip(name: str) -> Path:
+    def build(final: Path) -> None:
+        saved = load_saved_inputs(RESULTS_DIR, name)
+
+        def export(out_dir: Path) -> dict:
+            return export_prediction_vtk(
+                out_dir,
+                domain_name=_display_name(name),
+                global_bundle=saved["bundle"],
+                global_pred_flow=saved["pred_flow"],
+                roi_bundles=saved.get("roi_bundles"),
+                roi_pred_flows=saved.get("roi_preds"),
+            )
+
+        def extra(zf) -> None:
             # Bundle the terrain + structure STLs so the user can overlay them
             # in ParaView and immediately see where the cube interior corresponds
             # to terrain vs fluid.
@@ -2727,31 +2802,25 @@ def _render_vtk_zip(name: str) -> Path:
                     zf.write(stl_path, arcname=stl_name)
             # README explaining the layout + how to filter to fluid only.
             zf.writestr("README.txt", _VTK_README)
-        tmp_path.replace(zip_path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
-    return zip_path
+
+        _zip_export(final, export, extra)
+
+    return _cached_export(name, "vtk", build)
 
 
-def _render_npz_zip(name: str) -> bytes:
-    if not has_saved_inputs(RESULTS_DIR, name):
-        raise FileNotFoundError(f"No saved prediction for '{name}'")
-    saved = load_saved_inputs(RESULTS_DIR, name)
-    npz_dir = RESULTS_DIR / name / "npz"
-    info = export_prediction_npz(
-        npz_dir,
-        domain_name=_display_name(name),
-        global_bundle=saved["bundle"],
-        global_pred_flow=saved["pred_flow"],
-        roi_bundles=saved.get("roi_bundles"),
-        roi_pred_flows=saved.get("roi_preds"),
-    )
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in info["files"]:
-            zf.write(p, arcname=Path(p).name)
-    buf.seek(0)
-    return buf.read()
+def _render_npz_zip(name: str) -> Path:
+    def build(final: Path) -> None:
+        saved = load_saved_inputs(RESULTS_DIR, name)
+        _zip_export(final, lambda out_dir: export_prediction_npz(
+            out_dir,
+            domain_name=_display_name(name),
+            global_bundle=saved["bundle"],
+            global_pred_flow=saved["pred_flow"],
+            roi_bundles=saved.get("roi_bundles"),
+            roi_pred_flows=saved.get("roi_preds"),
+        ))
+
+    return _cached_export(name, "npz", build)
 
 
 def _read_pdf_bytes(name: str) -> bytes:
@@ -3027,6 +3096,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if missing_is_404 and isinstance(exc, FileNotFoundError):
             self._json({"success": False, "error": "not found"}, status=404)
             return
+        if isinstance(exc, ExportBusy):
+            self._json({"success": False, "retry_after": 10,
+                        "error": "Other exports are being prepared. Try again in a few seconds."},
+                       status=429)
+            return
         payload, status = _client_error(exc)
         self._json(payload, status=status)
 
@@ -3247,16 +3321,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not domain:
                     raise ValueError("missing ?domain=")
                 domain = self._domain(domain)
-                data = _render_npz_zip(domain)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/zip")
-                self.send_header(
-                    "Content-Disposition",
-                    _attachment(f"{_display_name(domain)}_npz.zip"),
+                self._send_path(
+                    _render_npz_zip(domain),
+                    content_type="application/zip",
+                    content_disposition=_attachment(f"{_display_name(domain)}_npz.zip"),
+                    allow_gzip=False,
                 )
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
             except Exception as ex:
                 self._fail(ex, missing_is_404=True)
             return

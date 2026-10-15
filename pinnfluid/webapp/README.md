@@ -84,6 +84,8 @@ Environment variables (all optional):
 | `PINN_WEBAPP_JOB_TTL_S` | 3600 | forget finished jobs after this many seconds (at most 200 are kept) |
 | `PINN_WEBAPP_WORK_TTL_S` | 21600 | remove DEMs, left-over workspaces and wind-rose summaries unused for this long (0 disables) |
 | `PINN_WEBAPP_MAX_DEMS` | 50 | keep at most this many DEM directories, newest first (0 disables) |
+| `PINN_WEBAPP_MAX_EXPORT_BUILDS` | 2 | VTK/NPZ export archives being built at once, all sessions (429 beyond; 0 disables) |
+| `PINN_WEBAPP_MAX_EXPORT_BUILDS_PER_SESSION` | 1 | the same for one session |
 | `PINN_DEVICE`           | auto    | force `cpu` or `cuda`                                         |
 | `PINN_WEBAPP_GITHUB_URL`| project repository | the "About / GitHub" link in the app header      |
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
