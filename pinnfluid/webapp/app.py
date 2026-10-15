@@ -2921,7 +2921,7 @@ class ExportBusy(Exception):
 
 
 _EXPORTS_LOCK = threading.Lock()
-_EXPORT_BUILDS: dict = {}  # (run name, kind) -> threading.Event, for builds in progress
+_EXPORT_BUILDS: dict = {}  # (run name, kind, generation) -> threading.Event, builds in progress
 
 
 def _admit_export_locked(name: str) -> None:
@@ -2929,7 +2929,7 @@ def _admit_export_locked(name: str) -> None:
     or PINN_WEBAPP_MAX_EXPORT_BUILDS_PER_SESSION (default 1) for one session."""
     max_global = _env_nonnegative_int("PINN_WEBAPP_MAX_EXPORT_BUILDS", 2)
     max_session = _env_nonnegative_int("PINN_WEBAPP_MAX_EXPORT_BUILDS_PER_SESSION", 1)
-    running = [run for run, _ in _EXPORT_BUILDS]
+    running = [run for run, _, _ in _EXPORT_BUILDS]
     if max_global and len(running) >= max_global:
         raise ExportBusy()
     prefix = name[:17] if _NAMESPACE_PREFIX_RE.match(name) else None
@@ -2937,18 +2937,32 @@ def _admit_export_locked(name: str) -> None:
         raise ExportBusy()
 
 
+def _run_generation(name: str) -> str:
+    """Names the saved prediction of a run: the modification time of its saved flow
+    field, which every new prediction of the run writes again."""
+    flow = RESULTS_DIR / name / "inputs" / "cfd" / "flow.npz"
+    try:
+        return str(flow.stat().st_mtime_ns)
+    except OSError:
+        return str((RESULTS_DIR / name / "inputs").stat().st_mtime_ns)
+
+
 def _cached_export(name: str, kind: str, build: Callable[[Path], None]) -> Path:
-    """exports/<name>_<kind>.zip of a run, built by `build(path)` on first use.
+    """exports/<name>_<kind>-<generation>.zip of a run, built by `build(path)` on
+    first use.
 
     The first request builds it (after the admission check) and renames it into
     place; requests for the same archive meanwhile wait for that build and get the
-    same file; later ones are served from the cache, without admission. A new
-    prediction of the run removes the cache (_invalidate_3d_cache).
+    same file; later ones are served from the cache, without admission. The name
+    carries the generation of the saved prediction (_run_generation), so an archive
+    whose build overlapped a new prediction of the run is never served for the new
+    one. While it builds, the run is busy (retention and pruning leave it alone).
     """
     if not has_saved_inputs(RESULTS_DIR, name):
         raise FileNotFoundError(f"No saved prediction for '{name}'")
-    final = RESULTS_DIR / name / "exports" / f"{name}_{kind}.zip"
-    key = (name, kind)
+    generation = _run_generation(name)
+    final = RESULTS_DIR / name / "exports" / f"{name}_{kind}-{generation}.zip"
+    key = (name, kind, generation)
     with _EXPORTS_LOCK:
         if final.is_file():
             return final
@@ -2959,7 +2973,11 @@ def _cached_export(name: str, kind: str, build: Callable[[Path], None]) -> Path:
             event = _EXPORT_BUILDS[key] = threading.Event()
     if owner:
         try:
-            build(final)
+            with _busy(name):
+                build(final)
+                for stale in final.parent.glob(f"{name}_{kind}-*.zip"):  # older generations
+                    if stale != final:
+                        stale.unlink(missing_ok=True)
         finally:
             with _EXPORTS_LOCK:
                 _EXPORT_BUILDS.pop(key, None)

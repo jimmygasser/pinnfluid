@@ -95,7 +95,9 @@ class ExportCacheTests(unittest.TestCase):
         browser.request("GET", "/")
         ns = app._cookie_namespace(browser.cookie.split("=", 1)[1])
         for name in names:
-            (self.results / f"{ns}_{name}" / "inputs").mkdir(parents=True)
+            cfd = self.results / f"{ns}_{name}" / "inputs" / "cfd"
+            cfd.mkdir(parents=True)
+            (cfd / "flow.npz").write_bytes(b"prediction 1")
         return browser
 
     def parallel(self, browser: Browser, path: str, n: int = 8):
@@ -165,6 +167,50 @@ class ExportCacheTests(unittest.TestCase):
         # a cached archive is served whatever is running
         self.assertEqual(alice.request("GET", "/download_vtk?domain=one")[0], 200)
         self.assertEqual(carol.request("GET", "/download_vtk?domain=one")[0], 200)
+
+    def run_name(self, browser: Browser, name: str) -> str:
+        return f"{app._cookie_namespace(browser.cookie.split('=', 1)[1])}_{name}"
+
+    def test_an_archive_built_during_a_new_prediction_is_not_served_for_it(self):
+        """A download that started before a new prediction of the same run must not
+        leave its archive as the cache of the new run."""
+        gate = threading.Event()
+        self.vtk.gate = gate
+        browser = self.browser_with_runs("site")
+        run = self.results / self.run_name(browser, "site")
+        with ThreadPoolExecutor(1) as pool:
+            first = pool.submit(browser.request, "GET", "/download_vtk?domain=site")
+            for _ in range(100):
+                if self.vtk.calls:
+                    break
+                time.sleep(0.02)
+            # a new prediction saves its inputs and drops the cached views and exports
+            time.sleep(0.01)
+            (run / "inputs" / "cfd" / "flow.npz").write_bytes(b"prediction 2")
+            app._invalidate_3d_cache(run.name)
+            gate.set()
+            self.assertEqual(first.result()[0], 200)
+        self.assertEqual(browser.request("GET", "/download_vtk?domain=site")[0], 200)
+        self.assertEqual(self.vtk.calls, 2, "the archive of the old prediction was served for the new one")
+
+    def test_a_run_being_exported_is_not_removed_by_the_retention(self):
+        gate = threading.Event()
+        self.vtk.gate = gate
+        browser = self.browser_with_runs("old", "new")
+        old = self.results / self.run_name(browser, "old")
+        new = self.results / self.run_name(browser, "new")
+        with ThreadPoolExecutor(1) as pool:
+            build = pool.submit(browser.request, "GET", "/download_vtk?domain=old")
+            for _ in range(100):
+                if self.vtk.calls:
+                    break
+                time.sleep(0.02)
+            os.utime(old, (time.time() - 3600, time.time() - 3600))  # the least recently used run
+            with patch.dict(os.environ, {"PINN_WEBAPP_MAX_RUNS_PER_SESSION": "1"}):
+                app._enforce_retention(new.name)
+            self.assertTrue(old.exists(), "the run was removed while its archive was being built")
+            gate.set()
+            self.assertEqual(build.result()[0], 200)
 
     def test_a_failed_build_leaves_nothing_and_answers_500(self):
         browser = self.browser_with_runs("site")
