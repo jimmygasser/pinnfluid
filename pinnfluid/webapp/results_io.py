@@ -149,9 +149,13 @@ def save_inputs_and_predictions(
     predict_out: dict,
     pressure_reference_kinematic: float,
     selection_path: Optional[Path] = None,
+    retention: bool = True,
 ) -> Path:
     """Mirror the bits of case_dir/cfd_dir we want to keep, then overwrite
     flow.npz with predictions. Returns the saved root path.
+
+    With retention=False the caller applies its own retention (the web app keeps
+    runs per session) instead of enforce_results_retention.
     """
     case_dir = Path(case_dir)
     cfd_dir = Path(cfd_dir)
@@ -209,10 +213,11 @@ def save_inputs_and_predictions(
 
     # Keep results/ within its retention budget (never removes the run we just
     # saved). Best-effort: a retention failure must not fail the prediction.
-    try:
-        enforce_results_retention(results_root, keep_name=domain_name)
-    except Exception:
-        pass
+    if retention:
+        try:
+            enforce_results_retention(results_root, keep_name=domain_name)
+        except Exception:
+            pass
 
     return saved_root
 

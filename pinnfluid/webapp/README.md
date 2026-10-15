@@ -66,8 +66,9 @@ Environment variables (all optional):
 | variable                | default | effect                                                        |
 |-------------------------|---------|---------------------------------------------------------------|
 | `PINN_WEBAPP_MODELS`    | (all)   | comma-separated model ids to offer, e.g. the hybrid only      |
-| `PINN_WEBAPP_MAX_RUNS`  | 40      | keep at most this many saved runs (0 disables)                |
-| `PINN_WEBAPP_MAX_GB`    | 15      | keep saved runs under this size budget in GB (0 disables)     |
+| `PINN_WEBAPP_MAX_RUNS_PER_SESSION` | 10 | the web app keeps each browser session's most recently used runs (a wind rose is one run; 0 disables) |
+| `PINN_WEBAPP_MAX_GB`    | 15      | all saved runs together stay under this size in GB, least recently used first (0 disables) |
+| `PINN_WEBAPP_MAX_RUNS`  | 40      | `results_io.enforce_results_retention` only (callers other than the web app; 0 disables) |
 | `PINN_WEBAPP_MAX_ACTIVE_JOBS` | 0 | reject jobs once this many are queued/running (0 disables)    |
 | `PINN_WEBAPP_RATE_LIMIT_JOBS` | 0 | process-wide job submissions per window (0 disables)          |
 | `PINN_WEBAPP_RATE_LIMIT_PREP` | 0 | terrain downloads/uploads/builds per window (0 disables)      |
@@ -108,8 +109,9 @@ Each saved run keeps ~50–100 MB under `webapp/results/<domain>/` (inputs +
 predictions + plots + PDF). DEM downloads are cached under `dem/`. With
 `PINN_WEBAPP_WORK_DIR` set, `dem/`, `workspace/` and `results/` are below that
 directory instead and nothing is written into the checkout. Old runs are
-pruned automatically to stay within `PINN_WEBAPP_MAX_RUNS` and
-`PINN_WEBAPP_MAX_GB` (the run just produced is never pruned). Both `results/`
+pruned automatically: each browser session keeps its `PINN_WEBAPP_MAX_RUNS_PER_SESSION`
+most recently used runs, and all runs stay within `PINN_WEBAPP_MAX_GB` (least
+recently used first; the run just produced and runs in use are never pruned). Both `results/`
 and `workspace/` are git-ignored. The 3D viewers and the map load plotly.js from
 the app itself (`static/plotly.min.js`, a relative URL like every other URL
 the app renders, so the pages also work under `PINN_WEBAPP_BASE_PATH`), so
@@ -133,8 +135,8 @@ HttpOnly cookie (`pinnfluid_session`, scoped to the base path); its domains are
 stored under a namespace derived from it, so results, terrain and jobs
 (`/job_status`) of one session are not reachable from another, even with the same
 domain name (they answer 404). The past-run index, disabled by default, lists the
-session's own runs only. Results still live only as long as the server keeps
-them (`PINN_WEBAPP_MAX_RUNS`, `PINN_WEBAPP_MAX_GB`). There is no
+session's own runs only. Results live as long as the server keeps them
+(`PINN_WEBAPP_MAX_RUNS_PER_SESSION`, `PINN_WEBAPP_MAX_GB`). There is no
 CSRF protection and the in-process limits are not DDoS-grade. Terrain steps,
 tile downloads (`data.geo.admin.ch` only) and idle connections have time limits.
 Clients see validation messages, or a generic message with a reference whose

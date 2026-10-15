@@ -121,6 +121,7 @@ from report import (  # type: ignore  noqa: E402
     write_rose_pdf_report,
 )
 from results_io import (  # type: ignore  noqa: E402
+    _dir_size_bytes,
     has_saved_inputs,
     load_saved_inputs,
     save_inputs_and_predictions,
@@ -412,8 +413,8 @@ def _prune_jobs_locked() -> None:
 def _prune_work_dirs() -> None:
     """Remove what no running operation uses and is older than
     PINN_WEBAPP_WORK_TTL_S (default 21600 s): DEM directories, left-over workspace
-    cases, and result directories without saved inputs (wind-rose summaries; runs
-    with inputs follow PINN_WEBAPP_MAX_RUNS/MAX_GB). Keep at most
+    cases, and result directories that are neither a run nor a wind rose (runs and
+    roses follow _enforce_retention). Keep at most
     PINN_WEBAPP_MAX_DEMS (default 50) DEM directories, newest first. Best effort."""
     ttl = _env_nonnegative_int("PINN_WEBAPP_WORK_TTL_S", 21600)
     max_dems = _env_nonnegative_int("PINN_WEBAPP_MAX_DEMS", 50)
@@ -445,8 +446,95 @@ def _prune_work_dirs() -> None:
         for _, d in dems[:max(0, len(dems) - max_dems)]:
             drop(d)
     for mtime, d in entries(RESULTS_DIR):
-        if ttl and now - mtime > ttl and not (d / "inputs").exists():
+        # runs with saved inputs and wind roses follow _enforce_retention
+        if ttl and now - mtime > ttl and not (d / "inputs").exists() \
+                and not (d / "rose_summary.json").exists():
             drop(d)
+
+
+_ROSE_SECTOR_RE = re.compile(r"(.+)_r\d{3}")
+
+
+def _touch_run(name: str) -> None:
+    """Mark a saved run as used now (the size cap evicts the least recently used)."""
+    try:
+        os.utime(RESULTS_DIR / name)
+    except OSError:
+        pass
+
+
+def _enforce_retention(keep: str) -> None:
+    """Keep saved runs per session, and all of them below a size cap.
+
+    A run is a result directory with saved inputs, or a wind rose: its summary
+    directory and its <name>_rXXX sector directories count as one run. Each
+    session (the namespace prefix of the name) keeps its
+    PINN_WEBAPP_MAX_RUNS_PER_SESSION (default 10) most recently used runs; then,
+    while all runs together exceed PINN_WEBAPP_MAX_GB (default 15), the least
+    recently used run of any session goes. The run `keep` (just saved) and runs
+    in use by an operation are never removed. 0 disables a limit. Best effort.
+    """
+    per_session = _env_nonnegative_int("PINN_WEBAPP_MAX_RUNS_PER_SESSION", 10)
+    try:
+        max_gb = max(0.0, float(os.environ.get("PINN_WEBAPP_MAX_GB", "15")))
+    except ValueError:
+        max_gb = 15.0
+    with _JOBS_LOCK:
+        busy = tuple(_BUSY)
+    try:
+        dirs = [d for d in RESULTS_DIR.iterdir() if d.is_dir()]
+    except OSError:
+        return
+    names = {d.name for d in dirs}
+
+    def group_of(name: str) -> str:
+        m = _ROSE_SECTOR_RE.fullmatch(name)
+        if m and m.group(1) in names and (RESULTS_DIR / m.group(1) / "rose_summary.json").exists():
+            return m.group(1)
+        return name
+
+    groups: dict = {}
+    for d in dirs:
+        if (d / "inputs").exists() or (d / "rose_summary.json").exists():
+            groups.setdefault(group_of(d.name), []).append(d)
+    keep_group = group_of(keep)
+
+    def protected(key: str, members: list) -> bool:
+        return key == keep_group or any(
+            m.name == b or m.name.startswith(b + "_") for m in members for b in busy
+        )
+
+    def last_used(members: list) -> float:
+        times = []
+        for m in members:
+            try:
+                times.append(m.stat().st_mtime)
+            except OSError:
+                pass
+        return max(times, default=0.0)
+
+    def drop(key: str) -> None:
+        for m in groups.pop(key):
+            shutil.rmtree(m, ignore_errors=True)
+
+    order = sorted(groups, key=lambda k: last_used(groups[k]), reverse=True)  # newest first
+    if per_session:
+        seen: dict = {}
+        for key in order:
+            ns = key[:16] if _NAMESPACE_PREFIX_RE.match(key) else ""
+            seen[ns] = seen.get(ns, 0) + 1
+            if seen[ns] > per_session and not protected(key, groups[key]):
+                drop(key)
+    if max_gb:
+        budget = int(max_gb * 1024 ** 3)
+        sizes = {k: sum(_dir_size_bytes(m) for m in groups[k]) for k in groups}
+        total = sum(sizes.values())
+        for key in reversed(order):  # least recently used first
+            if total <= budget:
+                break
+            if key in groups and not protected(key, groups[key]):
+                total -= sizes[key]
+                drop(key)
 
 
 def _socket_timeout_from_env() -> Optional[int]:
@@ -2146,6 +2234,7 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
             predict_out=infer_out,
             pressure_reference_kinematic=pressure_reference_kinematic,
             selection_path=selection_path if selection_path.exists() else None,
+            retention=False,  # per session, below (_enforce_retention)
         )
     except Exception as e:
         print(f"[predict_web] save_inputs warning: {e}", flush=True)
@@ -2200,6 +2289,8 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
         cleanup_case(name, keep_dem=True)
     except Exception as e:
         print(f"[predict_web] cleanup warning: {e}", flush=True)
+
+    _enforce_retention(name)
 
     bundle = infer_out["bundle"]
     n_structures = int((infer_out.get("roi_bundles") or {}).__len__()) if infer_out.get("roi_bundles") else 0
@@ -2522,6 +2613,7 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
     except Exception as e:
         print(f"[predict_web] rose PDF warning: {e}", flush=True)
         traceback.print_exc()
+    _enforce_retention(name)
 
     return {
         "success": True,
@@ -2745,6 +2837,7 @@ def _cached_export(name: str, kind: str, build: Callable[[Path], None]) -> Path:
             with _EXPORTS_LOCK:
                 _EXPORT_BUILDS.pop(key, None)
             event.set()
+        _enforce_retention(name)  # the archive counts against the size cap
         return final
     event.wait()
     if final.is_file():
@@ -3016,8 +3109,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._namespace
 
     def _domain(self, raw) -> str:
-        """The on-disk name of a domain of this session (ValueError if malformed)."""
-        return _session_name(self._session(), raw)
+        """The on-disk name of a domain of this session (ValueError if malformed);
+        an existing run counts as used now (retention)."""
+        name = _session_name(self._session(), raw)
+        if (RESULTS_DIR / name).is_dir():
+            _touch_run(name)
+        return name
 
     def _session_cookie(self, session_id: str) -> str:
         attrs = [f"{SESSION_COOKIE}={session_id}", f"Path={self.base_path}/", "HttpOnly",
