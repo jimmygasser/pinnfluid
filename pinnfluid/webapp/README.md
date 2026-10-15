@@ -169,3 +169,16 @@ ISA air density evaluated at the site's mean altitude, stated in the report.
 Internally the model outputs kinematic pressure (p/rho, m²/s², the OpenFOAM
 convention). Saved fields and VTK/NPZ exports retain that unmodified raw model
 output so downstream tools can choose their own pressure reference and density.
+
+## Embedding in a larger site (optional)
+
+A deployment that serves the app as part of a larger site can give it the site's
+look and headers; without these settings nothing changes (`site_integration.py`):
+
+| Variable | What it does |
+| --- | --- |
+| `PINN_WEBAPP_KIT_DIR` | a directory with the site's design kit (`tokens.css`, `cryosim-bar.js`, optional `VERSION`): the page shows the site's top bar (`<cryosim-bar>`) above the map, its nav becomes a bottom tab bar on phones, and the files are served at `static/kit/` |
+| `PINN_WEBAPP_KIT_HOME` | the bar's home link (default `/`) |
+| `PINN_WEBAPP_CSP` | a `Content-Security-Policy` header on every response |
+| `PINN_WEBAPP_ROBOTS_TAG` | an `X-Robots-Tag` header on every response, e.g. `noindex` |
+| `PINN_WEBAPP_INFO_DIR` | build information: `version.json`, `NOTICES.txt` (third-party notices) and `source/*.tar.gz` (the source archives, listed at `source/`) |

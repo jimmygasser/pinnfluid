@@ -59,6 +59,7 @@ for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_pre
 # Cloud Storage bucket) when deploying in a container whose local disk is
 # ephemeral. DEM downloads and uploads go to DEM_ROOT.
 from work_dir import DEM_ROOT, RESULTS_DIR, WORKSPACE  # type: ignore  noqa: E402
+import site_integration  # type: ignore  noqa: E402
 
 # URL prefix the app is served under behind a gateway (PINN_WEBAPP_BASE_PATH,
 # e.g. /pinnfluid): requests outside it get 404 and the prefix is stripped before
@@ -1081,7 +1082,8 @@ def _build_html() -> str:
     )
 
     html = html.replace("</body>", _PREDICT_SCRIPT + _SAMPLING_SCRIPT + "\n</body>", 1)
-    return html
+    # the site's bar and design tokens, when a deployment provides them
+    return site_integration.apply_kit(html, github_url=GITHUB_URL)
 
 
 def _model_picker_html() -> str:
@@ -3327,6 +3329,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
+        for name, value in site_integration.extra_headers():
+            self.send_header(name, value)
         super().end_headers()
 
     def _json(self, payload: dict, *, status: int = 200) -> None:
@@ -3524,6 +3528,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
             self.wfile.write(body)
+            return
+        site_file = site_integration.get(path)  # the site's kit and build information
+        if site_file is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", site_file[0])
+            self.send_header("Content-Length", str(len(site_file[1])))
+            self.end_headers()
+            self.wfile.write(site_file[1])
             return
         if path in ("/", "/index.html"):
             self._session()  # the cookie comes with the page
