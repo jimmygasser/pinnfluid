@@ -82,6 +82,9 @@ Environment variables (all optional):
 | `PINN_WEBAPP_ENABLE_RUN_INDEX` | 0 | expose the shared `/runs` index when set to 1              |
 | `PINN_WEBAPP_STEP_TIMEOUT_S` | 900 | time limit of one terrain step (dem_prep, place_structure, finalize_domain) |
 | `PINN_WEBAPP_SOCKET_TIMEOUT_S` | 60 | close a client connection silent for this long (0 disables) |
+| `PINN_WEBAPP_REQUEST_DEADLINE_S` | 60 | a request (line, headers, body) must arrive within this time in total (0 disables) |
+| `PINN_WEBAPP_MAX_CONNECTIONS` | 64 | connections the server holds at once; 503 beyond |
+| `PINN_WEBAPP_STATUS_DETAIL` | 0 | set to 1 to add the torch and CUDA versions to `/status` |
 | `PINN_WEBAPP_JOB_TTL_S` | 3600 | forget finished jobs after this many seconds (at most 200 are kept) |
 | `PINN_WEBAPP_WORK_TTL_S` | 21600 | remove DEMs, left-over workspaces and wind-rose summaries unused for this long (0 disables) |
 | `PINN_WEBAPP_MAX_DEMS` | 50 | keep at most this many DEM directories, newest first (0 disables) |
@@ -140,7 +143,9 @@ domain name (they answer 404). The past-run index, disabled by default, lists th
 session's own runs only. Results live as long as the server keeps them
 (`PINN_WEBAPP_MAX_RUNS_PER_SESSION`, `PINN_WEBAPP_MAX_GB`). There is no
 CSRF protection and the in-process limits are not DDoS-grade. Terrain steps,
-tile downloads (`data.geo.admin.ch` only) and idle connections have time limits.
+tile downloads (`data.geo.admin.ch` only), whole requests and idle connections
+have time limits, the number of connections is capped, and a terrain or
+prediction request beyond the limits is refused before its body is read.
 Clients see validation messages, or a generic message with a reference whose
 traceback is in the server log; responses carry no server paths. Follow
 `DEPLOY.md` before exposing the app publicly; use authentication or Cloud Armor

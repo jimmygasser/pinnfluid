@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -570,6 +571,47 @@ def _enforce_retention(keep: str) -> None:
                 drop(key)
 
 
+def _request_deadline_s() -> int:
+    """Seconds a whole request may take to arrive (PINN_WEBAPP_REQUEST_DEADLINE_S,
+    default 60; 0 for none)."""
+    return _env_nonnegative_int("PINN_WEBAPP_REQUEST_DEADLINE_S", 60)
+
+
+class LimitedHTTPServer(http.server.ThreadingHTTPServer):
+    """A threading server that holds at most PINN_WEBAPP_MAX_CONNECTIONS
+    connections (default 64; read at start) and answers 503 to more."""
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(
+            max(1, _env_nonnegative_int("PINN_WEBAPP_MAX_CONNECTIONS", 64)))
+        self._held: set = set()
+        self._held_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                                b"Retry-After: 5\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        with self._held_lock:
+            self._held.add(id(request))
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        with self._held_lock:
+            held = id(request) in self._held
+            self._held.discard(id(request))
+        try:
+            super().shutdown_request(request)
+        finally:
+            if held:
+                self._slots.release()
+
+
 def _socket_timeout_from_env() -> Optional[int]:
     """Seconds a client connection may stay silent (PINN_WEBAPP_SOCKET_TIMEOUT_S,
     default 60; 0 for none)."""
@@ -580,22 +622,33 @@ def _active_jobs_locked() -> int:
     return sum(j.get("state") in ("queued", "running") for j in _JOBS.values())
 
 
-def _prep_admit() -> tuple[bool, str, int]:
-    """Reserve one synchronous terrain/input-preparation operation."""
-    global _PREP_ACTIVE
+def _prep_refusal_locked(now: float) -> Optional[tuple[str, int]]:
+    """(message, retry_after) if a terrain/input-preparation operation may not
+    start now, else None. Caller holds _JOBS_LOCK."""
     max_active = _env_nonnegative_int("PINN_WEBAPP_MAX_ACTIVE_JOBS", 0)
     rate_ops = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_PREP", 0)
     window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
+    if max_active and _active_jobs_locked() + _PREP_ACTIVE >= max_active:
+        return "Another terrain or prediction operation is already running.", 30
+    if rate_ops and window:
+        cutoff = now - window
+        _PREP_SUBMISSIONS[:] = [t for t in _PREP_SUBMISSIONS if t >= cutoff]
+        if len(_PREP_SUBMISSIONS) >= rate_ops:
+            retry_after = max(1, int(_PREP_SUBMISSIONS[0] + window - now) + 1)
+            return "The public terrain-processing limit has been reached. Try again later.", retry_after
+    return None
+
+
+def _prep_admit() -> tuple[bool, str, int]:
+    """Reserve one synchronous terrain/input-preparation operation."""
+    global _PREP_ACTIVE
     now = time.time()
     with _JOBS_LOCK:
-        if max_active and _active_jobs_locked() + _PREP_ACTIVE >= max_active:
-            return False, "Another terrain or prediction operation is already running.", 30
-        if rate_ops and window:
-            cutoff = now - window
-            _PREP_SUBMISSIONS[:] = [t for t in _PREP_SUBMISSIONS if t >= cutoff]
-            if len(_PREP_SUBMISSIONS) >= rate_ops:
-                retry_after = max(1, int(_PREP_SUBMISSIONS[0] + window - now) + 1)
-                return False, "The public terrain-processing limit has been reached. Try again later.", retry_after
+        refusal = _prep_refusal_locked(now)
+        if refusal:
+            return False, refusal[0], refusal[1]
+        if _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_PREP", 0) and \
+                _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600):
             _PREP_SUBMISSIONS.append(now)
         _PREP_ACTIVE += 1
     return True, "", 0
@@ -706,6 +759,23 @@ def _validate_dem_bounds(body: dict) -> tuple[float, float, float, float]:
     return west, south, east, north
 
 
+def _job_refusal_locked(now: float) -> Optional[tuple[str, int]]:
+    """(message, retry_after) if a prediction job may not start now, else None.
+    Caller holds _JOBS_LOCK."""
+    max_active = _env_nonnegative_int("PINN_WEBAPP_MAX_ACTIVE_JOBS", 0)
+    rate_jobs = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_JOBS", 0)
+    window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
+    if max_active and _active_jobs_locked() + _PREP_ACTIVE >= max_active:
+        return "A prediction is already running. Try again when it finishes.", 30
+    if rate_jobs and window:
+        cutoff = now - window
+        _JOB_SUBMISSIONS[:] = [t for t in _JOB_SUBMISSIONS if t >= cutoff]
+        if len(_JOB_SUBMISSIONS) >= rate_jobs:
+            retry_after = max(1, int(_JOB_SUBMISSIONS[0] + window - now) + 1)
+            return "The public prediction limit has been reached. Try again later.", retry_after
+    return None
+
+
 def _job_admit_and_create(kind: str, session: Optional[str] = None) -> tuple[Optional[str], str, int]:
     """Apply process-local cost guards and atomically reserve a heavy job.
 
@@ -713,23 +783,14 @@ def _job_admit_and_create(kind: str, session: Optional[str] = None) -> tuple[Opt
     it cannot be bypassed by changing a client IP header. Values of zero disable
     the corresponding guard. The counters reset when the instance scales down.
     """
-    max_active = _env_nonnegative_int("PINN_WEBAPP_MAX_ACTIVE_JOBS", 0)
     rate_jobs = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_JOBS", 0)
     window = _env_nonnegative_int("PINN_WEBAPP_RATE_LIMIT_WINDOW", 3600)
     now = time.time()
     with _JOBS_LOCK:
         _prune_jobs_locked()
-        active = _active_jobs_locked() + _PREP_ACTIVE
-        if max_active and active >= max_active:
-            return None, "A prediction is already running. Try again when it finishes.", 30
-
-        if rate_jobs and window:
-            cutoff = now - window
-            _JOB_SUBMISSIONS[:] = [t for t in _JOB_SUBMISSIONS if t >= cutoff]
-            if len(_JOB_SUBMISSIONS) >= rate_jobs:
-                retry_after = max(1, int(_JOB_SUBMISSIONS[0] + window - now) + 1)
-                return None, "The public prediction limit has been reached. Try again later.", retry_after
-
+        refusal = _job_refusal_locked(now)
+        if refusal:
+            return None, refusal[0], refusal[1]
         if rate_jobs and window:
             _JOB_SUBMISSIONS.append(now)
         jid = uuid.uuid4().hex[:12]
@@ -3094,6 +3155,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
     page_html: str = ""
     base_path: str = ""  # set by main() from PINN_WEBAPP_BASE_PATH
     timeout = 60  # seconds a connection may stay silent; main() reads the setting
+    _deadline: Optional[threading.Timer] = None
+
+    def handle_one_request(self):
+        """One request; the request line, headers and body must arrive within
+        PINN_WEBAPP_REQUEST_DEADLINE_S in total (a client trickling bytes is cut off)."""
+        self._arm_deadline()
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):  # the client (or the deadline) closed it
+            self.close_connection = True
+        finally:
+            self._disarm_deadline()
+
+    def _arm_deadline(self) -> None:
+        seconds = _request_deadline_s()
+        if seconds:
+            self._deadline = threading.Timer(seconds, self._deadline_passed)
+            self._deadline.daemon = True
+            self._deadline.start()
+
+    def _disarm_deadline(self) -> None:
+        timer, self._deadline = self._deadline, None
+        if timer is not None:
+            timer.cancel()
+
+    def _deadline_passed(self) -> None:
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)  # the pending read ends
+        except OSError:
+            pass
     # Per request (one handler serves every request of a keep-alive connection).
     _namespace: Optional[str] = None  # this session's namespace, once looked up
     _new_session_id: Optional[str] = None  # sent as Set-Cookie with the response
@@ -3242,6 +3334,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - never fail a request on pruning
             _client_error(exc)
 
+    @staticmethod
+    def _admission_preview(route: str) -> Optional[tuple[str, int]]:
+        """Whether a POST to `route` would be refused for capacity: checked before
+        the request body (up to PINN_WEBAPP_MAX_REQUEST_MB) is read. Nothing is
+        reserved; the request is admitted for real once its body is valid."""
+        now = time.time()
+        with _JOBS_LOCK:
+            if route in ("/download_dem", "/upload_dem", "/build_inputs"):
+                return _prep_refusal_locked(now)
+            if route in ("/predict", "/predict_rose"):
+                return _job_refusal_locked(now)
+        return None
+
     def _admit_preparation(self) -> bool:
         self._prune()
         ok, message, retry_after = _prep_admit()
@@ -3310,6 +3415,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_GET(self):
+        self._disarm_deadline()  # the request has arrived; the work is not limited
         path = self._route()
         if path is None:
             return
@@ -3317,10 +3423,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # externally reachable diagnostic endpoint. Keep the old path for
         # local compatibility.
         if path in ("/status", "/healthz"):
+            runtime = runtime_device_info()
+            if not _env_flag("PINN_WEBAPP_STATUS_DETAIL", False):
+                # the device, not the software versions (PINN_WEBAPP_STATUS_DETAIL=1 adds them)
+                runtime = {k: v for k, v in runtime.items() if k not in ("torch", "cuda_runtime")}
             self._json({
                 "status": "ok",
                 "models": [m["id"] for m in list_models()],
-                "runtime": runtime_device_info(),
+                "runtime": runtime,
             })
             return
         if path == "/static/plotly.min.js":
@@ -3561,7 +3671,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route is None:
             self.close_connection = True  # the request body was not read
             return
+        refusal = self._admission_preview(route)
+        if refusal:
+            self.close_connection = True  # the request body is not read
+            self._disarm_deadline()
+            self._json({"success": False, "error": refusal[0], "retry_after": refusal[1]}, status=429)
+            return
         body = self._read_json_body()
+        self._disarm_deadline()  # the request has arrived; the work is not limited
         if body is None:
             return
 
@@ -3766,7 +3883,7 @@ def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     Handler.page_html = _build_html()
 
-    server = http.server.ThreadingHTTPServer((args.host, int(args.port)), Handler)
+    server = LimitedHTTPServer((args.host, int(args.port)), Handler)
     shown_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
     url = f"http://{shown_host}:{args.port}{Handler.base_path}/"
     print(f"[predict_web] Serving at {url}  (bind {args.host}:{args.port})")
