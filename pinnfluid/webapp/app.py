@@ -188,10 +188,13 @@ def _check_structure_type(item: dict) -> None:
 SESSION_COOKIE = "pinnfluid_session"
 # The cookie value is "<id>.<signature>": 128 random bits and an HMAC-SHA-256 (first
 # 128 bits) of the id. The server accepts only ids it signed: a forged or stale id
-# gets a fresh session (a page of the same origin can still plant a cookie the
-# server did sign: the origin is the boundary). The key is
-# PINN_WEBAPP_SESSION_SECRET when instances must share sessions, else a random
-# secret of this process (sessions end with the process, like its jobs).
+# gets a fresh session. That does not stop a page of the same origin from planting a
+# cookie the server did sign (cookies are shared by an origin's pages, so the origin
+# is the boundary); a request with two different session cookies gets a fresh
+# session, so the work goes into neither. The key is PINN_WEBAPP_SESSION_SECRET
+# (32 bytes or more) when sessions must outlive the process or be shared by
+# instances, for example with results on persistent storage; else a random secret of
+# this process (sessions end with the process, like its jobs).
 _SESSION_VALUE_RE = re.compile(r"([0-9a-f]{32})\.([0-9a-f]{32})")
 _INSTANCE_SECRET = secrets.token_bytes(32)
 
@@ -199,6 +202,15 @@ _INSTANCE_SECRET = secrets.token_bytes(32)
 def _session_key() -> bytes:
     shared = os.environ.get("PINN_WEBAPP_SESSION_SECRET", "")
     return shared.encode("utf-8") if shared else _INSTANCE_SECRET
+
+
+def _session_secret_problem() -> Optional[str]:
+    """Why PINN_WEBAPP_SESSION_SECRET is unsafe (printed at startup), or None."""
+    shared = os.environ.get("PINN_WEBAPP_SESSION_SECRET", "")
+    if shared and len(shared.encode("utf-8")) < 32:
+        return ("PINN_WEBAPP_SESSION_SECRET has fewer than 32 bytes: session cookies can be "
+                "forged by guessing it; use at least 32 bytes of random data")
+    return None
 
 
 def _sign_session(session_id: str) -> str:
@@ -3214,15 +3226,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _cookie_session_id(self) -> Optional[str]:
-        """The id of a session cookie this server issued, if the browser sent one."""
+        """The id of the session cookie this server issued, if the browser sent one;
+        None (a fresh session) also when it sent two different ones."""
+        found = set()
         for header in self.headers.get_all("Cookie") or []:
             for part in header.split(";"):
                 key, _, value = part.strip().partition("=")
                 if key == SESSION_COOKIE:
                     session_id = _verified_session_id(value.strip('"'))
                     if session_id:
-                        return session_id
-        return None
+                        found.add(session_id)
+        return found.pop() if len(found) == 1 else None
 
     def _session(self) -> str:
         """This request's session namespace; a browser without a valid session
@@ -3880,6 +3894,8 @@ def main() -> None:
     except ValueError as exc:
         ap.error(str(exc))
     Handler.timeout = _socket_timeout_from_env()
+    if _session_secret_problem():
+        print(f"[predict_web] WARNING: {_session_secret_problem()}")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     Handler.page_html = _build_html()
 
