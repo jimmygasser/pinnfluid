@@ -760,7 +760,7 @@ function addStructManual() {
     return;
   }
   // Swiss path: inputs are LV95 → WGS84 for marker.
-  fetch('/lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
+  fetch('lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
     if (d.lat && d.lng) { addStructAtLatLng(d.lat, d.lng); }
     else { setStatus('Coordinate conversion failed','err'); }
   });
@@ -857,7 +857,7 @@ function downloadDEM() {
   setStatus('Downloading DEM tiles...','busy');
   dlBtn.disabled = true;
   btnProgressStart(dlBtn, 12);
-  fetch('/download_dem', {
+  fetch('download_dem', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
@@ -908,7 +908,7 @@ function buildDomain() {
   var z0 = parseFloat(document.getElementById('z0').value) || 0.1;
   var flattenGround = document.getElementById('flattenGround').checked;
 
-  fetch('/build', {
+  fetch('build', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
@@ -1074,7 +1074,7 @@ function addGridManual() {
     addGridAtLatLng(ll[0], ll[1]);
     return;
   }
-  fetch('/lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
+  fetch('lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
     if (d.lat && d.lng) addGridAtLatLng(d.lat, d.lng);
     else setStatus('Coordinate conversion failed','err');
   });
@@ -1252,7 +1252,7 @@ function uploadCustomDEM() {
   setStatus('Uploading custom DEM ('+(file.size/1e6).toFixed(1)+' MB)...','busy');
   document.getElementById('btnUploadDEM').disabled = true;
   _readFileAsBase64(file).then(function(b64) {
-    return fetch('/upload_dem', {
+    return fetch('upload_dem', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({domain_name:name, data_base64:b64})

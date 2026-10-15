@@ -1321,7 +1321,7 @@ def write_3d_html(out_path: Path, *, saved_inputs: dict, domain_name: str,
     fig, meta = build_3d_figure(saved_inputs, domain_name=domain_name,
                                 structure_stl_path=structure_stl_path, satellite=satellite)
     html = fig.to_html(
-        include_plotlyjs='/static/plotly.min.js', full_html=True,  # served same-origin by app.py: offline + CSP safe
+        include_plotlyjs='static/plotly.min.js', full_html=True,  # served same-origin by app.py (relative: works under a base path): offline + CSP safe
         config={'displayModeBar': True, 'scrollZoom': True},
     )
     html = html.replace('</body>', _streamline_js_hook(meta) + '\n</body>')
@@ -2108,7 +2108,7 @@ def write_structure_3d_html(out_path: Path, *, saved_inputs: dict, domain_name: 
         structure_stl_path=structure_stl_path, roi_label=roi_label, satellite=satellite,
     )
     html = fig.to_html(
-        include_plotlyjs='/static/plotly.min.js', full_html=True,  # served same-origin by app.py: offline + CSP safe
+        include_plotlyjs='static/plotly.min.js', full_html=True,  # served same-origin by app.py (relative: works under a base path): offline + CSP safe
         config={'displayModeBar': True, 'scrollZoom': True},
     )
     html = html.replace('</body>', _streamline_js_hook(meta) + '\n</body>')

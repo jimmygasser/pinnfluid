@@ -23,6 +23,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import threading
@@ -43,6 +44,30 @@ ROOT = SCRIPTS_DIR.parent
 # container whose local disk is ephemeral.
 RESULTS_DIR = Path(os.environ.get(
     "PINN_WEBAPP_RESULTS_DIR", Path(__file__).resolve().parent / "results"))
+
+# URL prefix the app is served under behind a gateway (PINN_WEBAPP_BASE_PATH,
+# e.g. /pinnfluid): requests outside it get 404 and the prefix is stripped before
+# routing. Every URL the app renders is relative, so the pages work at / and under
+# any prefix. Read once at startup (main); empty means the root.
+_BASE_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._~-]+)+")
+
+
+def _normalise_base_path(raw) -> str:
+    """Empty for the root, else a prefix like /name or /a/b, without a trailing slash."""
+    s = str(raw or "").strip()
+    if s in ("", "/"):
+        return ""
+    s = s[:-1] if s.endswith("/") else s
+    if not _BASE_PATH_RE.fullmatch(s) or any(seg in (".", "..") for seg in s.split("/")[1:]):
+        raise ValueError(
+            f"PINN_WEBAPP_BASE_PATH must be empty or a path like /pinnfluid, got {raw!r}"
+        )
+    return s
+
+
+def _base_path_from_env() -> str:
+    return _normalise_base_path(os.environ.get("PINN_WEBAPP_BASE_PATH", ""))
+
 
 # Public repository linked from the app header; deployments may override it.
 GITHUB_URL = os.environ.get(
@@ -357,7 +382,7 @@ def _job_start(jid: str, fn: Callable[[Callable[[str], None]], dict]) -> None:
 
 # Bump whenever view_3d.py / interactive_map.py change what the cached HTML
 # contains, so runs predicted before the change are re-rendered on next open.
-_VIEW_HTML_VERSION = 2
+_VIEW_HTML_VERSION = 3  # 3: plotly.js loaded by a relative URL (base path)
 
 
 def _refresh_view_cache(name: str) -> None:
@@ -596,7 +621,7 @@ def _extra_controls_html() -> str:
         for n in sector_options
     )
     past_runs = (
-        '      <div style="margin-top:8px;"><a href="/runs" target="_blank" '
+        '      <div style="margin-top:8px;"><a href="runs" target="_blank" '
         'style="font-size:12px;">Past runs</a></div>\n'
         if _env_flag("PINN_WEBAPP_ENABLE_RUN_INDEX", False)
         else ""
@@ -976,23 +1001,23 @@ function renderReport(payload) {
   meta.innerHTML = lines.join(' &nbsp;·&nbsp; ');
 
   // Buttons (always wired; download endpoints check existence on the server)
-  document.getElementById('dlPdfBtn').href   = '/download_pdf?domain=' + encodeURIComponent(domain);
-  document.getElementById('dlVtkBtn').href   = '/download_vtk?domain=' + encodeURIComponent(domain);
-  document.getElementById('dlNpzBtn').href   = '/download_npz?domain=' + encodeURIComponent(domain);
-  document.getElementById('dlPlotsBtn').href = '/download_zip?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlPdfBtn').href   = 'download_pdf?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlVtkBtn').href   = 'download_vtk?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlNpzBtn').href   = 'download_npz?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlPlotsBtn').href = 'download_zip?domain=' + encodeURIComponent(domain);
   // 3D view: always available — endpoint generates on first hit (lazy).
-  document.getElementById('mapBtn').href = '/map?domain=' + encodeURIComponent(domain);
-  document.getElementById('view3dBtn').href = '/view_3d?domain=' + encodeURIComponent(domain);
+  document.getElementById('mapBtn').href = 'map?domain=' + encodeURIComponent(domain);
+  document.getElementById('view3dBtn').href = 'view_3d?domain=' + encodeURIComponent(domain);
   // Structure view only makes sense when the case has at least one structure.
   var nStr = parseInt((payload && payload.n_structures) || 0);
   var hasStruct = nStr > 0;
   var strBtn = document.getElementById('view3dStrBtn');
-  strBtn.href = '/view_3d_structure?domain=' + encodeURIComponent(domain);
+  strBtn.href = 'view_3d_structure?domain=' + encodeURIComponent(domain);
   strBtn.style.display = hasStruct ? '' : 'none';
 
   // Primary view: the interactive map, embedded as the first result.
   var mapFrame = document.getElementById('predict-map');
-  mapFrame.src = '/map?domain=' + encodeURIComponent(domain);
+  mapFrame.src = 'map?domain=' + encodeURIComponent(domain);
   mapFrame.style.display = 'block';
   document.getElementById('predict-map-hint').style.display = 'block';
 
@@ -1139,7 +1164,7 @@ function confirmStructures() {
   _setConfirmBtnsDisabled(true);
   btnProgressStart(actBtn, 25);
   document.getElementById('btnBuild').disabled = true;
-  fetch('/build_inputs', {
+  fetch('build_inputs', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify(body)
@@ -1198,7 +1223,7 @@ function onModelChange() {
 
 function _pollJob(jobId, onDone) {
   var timer = setInterval(function() {
-    fetch('/job_status?id=' + encodeURIComponent(jobId)).then(r=>r.json()).then(function(j) {
+    fetch('job_status?id=' + encodeURIComponent(jobId)).then(r=>r.json()).then(function(j) {
       if (j.state === 'queued' || j.state === 'running') {
         var msg = j.message || '';
         setStatus(msg || 'working…', 'busy');
@@ -1255,14 +1280,14 @@ function renderRose(payload) {
 
   // Combined multi-direction PDF + 3D wrappers (direction selector) live at
   // the BASE domain; raw VTK/NPZ exports default to the governing direction.
-  document.getElementById('dlPdfBtn').href   = '/download_pdf?domain=' + encodeURIComponent(domain);
-  document.getElementById('dlVtkBtn').href   = '/download_vtk?domain=' + encodeURIComponent(worst);
-  document.getElementById('dlNpzBtn').href   = '/download_npz?domain=' + encodeURIComponent(worst);
-  document.getElementById('dlPlotsBtn').href = '/download_zip?domain=' + encodeURIComponent(worst);
-  document.getElementById('mapBtn').href = '/map_rose?domain=' + encodeURIComponent(domain);
-  document.getElementById('view3dBtn').href  = '/view_3d_rose?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlPdfBtn').href   = 'download_pdf?domain=' + encodeURIComponent(domain);
+  document.getElementById('dlVtkBtn').href   = 'download_vtk?domain=' + encodeURIComponent(worst);
+  document.getElementById('dlNpzBtn').href   = 'download_npz?domain=' + encodeURIComponent(worst);
+  document.getElementById('dlPlotsBtn').href = 'download_zip?domain=' + encodeURIComponent(worst);
+  document.getElementById('mapBtn').href = 'map_rose?domain=' + encodeURIComponent(domain);
+  document.getElementById('view3dBtn').href  = 'view_3d_rose?domain=' + encodeURIComponent(domain);
   var strBtn = document.getElementById('view3dStrBtn');
-  strBtn.href = '/view_3d_structure_rose?domain=' + encodeURIComponent(domain);
+  strBtn.href = 'view_3d_structure_rose?domain=' + encodeURIComponent(domain);
   strBtn.style.display = (payload.n_structures > 0) ? '' : 'none';
 
   var html = '';
@@ -1278,10 +1303,10 @@ function renderRose(payload) {
   (payload.sectors || []).forEach(function(s) {
     var isWorst = (s.domain === worst);
     var dq = encodeURIComponent(s.domain);
-    var links = '<a href="/download_pdf?domain='+dq+'" target="_blank">PDF</a> · '
-              + '<a href="/map?domain='+dq+'" target="_blank">map</a> · '
-              + '<a href="/view_3d?domain='+dq+'" target="_blank">3D</a> · '
-              + '<a href="/download_zip?domain='+dq+'">plots</a>'
+    var links = '<a href="download_pdf?domain='+dq+'" target="_blank">PDF</a> · '
+              + '<a href="map?domain='+dq+'" target="_blank">map</a> · '
+              + '<a href="view_3d?domain='+dq+'" target="_blank">3D</a> · '
+              + '<a href="download_zip?domain='+dq+'">plots</a>'
               + (isWorst ? ' <b style="color:#e65100;">governing</b>' : '');
     html += '<tr'+(isWorst?' style="background:#fff3e0;font-weight:600;"':'')+'>'
          + '<td class="num">'+s.dir_deg.toFixed(0)+'</td>'
@@ -1352,7 +1377,7 @@ function runPredict() {
 
   document.getElementById('btnBuild').disabled = true;
   btnProgressStart(document.getElementById('btnBuild'), roseOn ? 420 : 120);
-  var endpoint = roseOn ? '/predict_rose' : '/predict';
+  var endpoint = roseOn ? 'predict_rose' : 'predict';
   setStatus(roseOn ? 'Starting wind-rose sweep…' : 'Starting prediction…', 'busy');
   fetch(endpoint, {
     method:'POST',
@@ -1431,7 +1456,7 @@ function addSamplingManual() {
     addSamplingAtLatLng(ll[0], ll[1]);
     return;
   }
-  fetch('/lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
+  fetch('lv95_to_wgs84?e='+e+'&n='+n).then(r=>r.json()).then(function(d) {
     if (d.lat && d.lng) { addSamplingAtLatLng(d.lat, d.lng); }
     else { setStatus('Coordinate conversion failed','err'); }
   });
@@ -2272,7 +2297,7 @@ def _rose_direction_wrapper_html(
 
 
 def _rose_3d_wrapper_html(name: str, *, structure: bool) -> str:
-    endpoint = "/view_3d_structure" if structure else "/view_3d"
+    endpoint = "view_3d_structure" if structure else "view_3d"
     heading = "3D structure view" if structure else "3D view"
     return _rose_direction_wrapper_html(
         name,
@@ -2285,7 +2310,7 @@ def _rose_3d_wrapper_html(name: str, *, structure: bool) -> str:
 def _rose_map_wrapper_html(name: str) -> str:
     return _rose_direction_wrapper_html(
         name,
-        endpoint="/map",
+        endpoint="map",
         heading="Interactive map",
         detail="Select a wind direction to compare wind, pressure and terrain.",
     )
@@ -2310,12 +2335,12 @@ def _runs_index_html() -> str:
         max_u = (g.get("max_umag") or {}).get("value_mps")
         links = []
         if (d / "report.pdf").exists():
-            links.append(f'<a href="/download_pdf?domain={name_url}">PDF</a>')
+            links.append(f'<a href="download_pdf?domain={name_url}">PDF</a>')
         if has_saved_inputs(RESULTS_DIR, d.name):
-            links.append(f'<a href="/view_3d?domain={name_url}" target="_blank">3D</a>')
-            links.append(f'<a href="/download_vtk?domain={name_url}">VTK</a>')
+            links.append(f'<a href="view_3d?domain={name_url}" target="_blank">3D</a>')
+            links.append(f'<a href="download_vtk?domain={name_url}">VTK</a>')
         if (d / "plots").exists():
-            links.append(f'<a href="/download_zip?domain={name_url}">plots</a>')
+            links.append(f'<a href="download_zip?domain={name_url}">plots</a>')
         rose = " 🌹" if (d / "rose_summary.json").exists() else ""
         max_u_cell = f"{max_u:.2f} m/s" if max_u is not None else "—"
         rows.append(
@@ -2538,7 +2563,7 @@ def _structure_roi_chooser_html(name: str, labels: list[str]) -> str:
     name_esc = _html.escape(name)
     name_url = quote(name)
     rows = "".join(
-        f'<li><a href="/view_3d_structure?domain={name_url}&roi={quote(lbl)}" '
+        f'<li><a href="view_3d_structure?domain={name_url}&roi={quote(lbl)}" '
         f'style="display:inline-block;padding:8px 14px;margin:4px 0;background:#8e24aa;'
         f'color:#fff;border-radius:6px;text-decoration:none;font-weight:600;">'
         f'🏛️ {_html.escape(lbl)}</a></li>'
@@ -2582,6 +2607,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
     dem_root = str(ROOT / "dem")
     page_html: str = ""
+    base_path: str = ""  # set by main() from PINN_WEBAPP_BASE_PATH
+
+    def _route(self) -> Optional[str]:
+        """The request path below base_path, or None once a redirect or 404 is sent."""
+        parsed = urlparse(self.path)
+        path, base = parsed.path, self.base_path
+        if not base:
+            return path
+        if path.startswith(base + "/"):
+            return path[len(base):]
+        if path == base:
+            # Relative URLs resolve against the directory: /pinnfluid -> /pinnfluid/
+            self.send_response(308)
+            self.send_header("Location", base + "/" + (f"?{parsed.query}" if parsed.query else ""))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        self.send_error(404)
+        return None
 
     def log_message(self, fmt, *args):
         pass
@@ -2712,7 +2756,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        path = self._route()
+        if path is None:
+            return
         # Cloud Run reserves /healthz at its frontend, so /status is the
         # externally reachable diagnostic endpoint. Keep the old path for
         # local compatibility.
@@ -2948,11 +2994,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        route = self._route()
+        if route is None:
+            self.close_connection = True  # the request body was not read
+            return
         body = self._read_json_body()
         if body is None:
             return
 
-        if self.path == "/download_dem":
+        if route == "/download_dem":
             admitted = False
             try:
                 west, south, east, north = _validate_dem_bounds(body)
@@ -2994,7 +3044,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _prep_release()
             return
 
-        if self.path == "/upload_dem":
+        if route == "/upload_dem":
             admitted = False
             try:
                 name = _safe_name(body.get("domain_name", ""))
@@ -3043,7 +3093,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _prep_release()
             return
 
-        if self.path == "/build_inputs":
+        if route == "/build_inputs":
             name = str(body.get("domain_name", "")).strip()
             admitted = False
             try:
@@ -3069,8 +3119,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _prep_release()
             return
 
-        if self.path in ("/predict", "/predict_rose"):
-            is_rose = self.path == "/predict_rose"
+        if route in ("/predict", "/predict_rose"):
+            is_rose = route == "/predict_rose"
             try:
                 name = _safe_name(body.get("domain_name"))
                 _validate_compute_request(body)
@@ -3134,12 +3184,16 @@ def main() -> None:
             pass
         print(f"[predict_web] PyTorch CPU threads: {torch_threads}")
 
+    try:
+        Handler.base_path = _base_path_from_env()
+    except ValueError as exc:
+        ap.error(str(exc))
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     Handler.page_html = _build_html()
 
     server = http.server.ThreadingHTTPServer((args.host, int(args.port)), Handler)
     shown_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
-    url = f"http://{shown_host}:{args.port}/"
+    url = f"http://{shown_host}:{args.port}{Handler.base_path}/"
     print(f"[predict_web] Serving at {url}  (bind {args.host}:{args.port})")
     print(f"[predict_web] Results root: {RESULTS_DIR}")
     print(f"[predict_web] Runtime: {runtime_device_info()}")

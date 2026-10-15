@@ -301,7 +301,7 @@ def write_map_html(out_path: Path, *, case_dir: Path, domain_name: str,
     )
 
     html = fig.to_html(
-        include_plotlyjs='/static/plotly.min.js', full_html=True,
+        include_plotlyjs='static/plotly.min.js', full_html=True,
         config={'displayModeBar': True, 'scrollZoom': True, 'responsive': True},
     )
     out_path.write_text(html, encoding="utf-8")

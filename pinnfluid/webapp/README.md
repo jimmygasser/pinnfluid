@@ -83,6 +83,7 @@ Environment variables (all optional):
 | `PINN_WEBAPP_HOST`      | 127.0.0.1 | bind address; set `0.0.0.0` in a container                   |
 | `PORT`                  | 8779    | listen port (Cloud Run / Docker set this automatically)       |
 | `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container     |
+| `PINN_WEBAPP_BASE_PATH` | (root) | URL prefix behind a gateway, e.g. `/pinnfluid`: the app answers only under it (404 elsewhere) |
 
 `models.yaml` (next to `app.py`) is the file equivalent of `PINN_WEBAPP_MODELS`
 and also sets the default model. On a CPU-only host, serve the fast hybrid only:
@@ -98,8 +99,9 @@ predictions + plots + PDF). DEM downloads are cached under `dem/`. Old runs are
 pruned automatically to stay within `PINN_WEBAPP_MAX_RUNS` and
 `PINN_WEBAPP_MAX_GB` (the run just produced is never pruned). Both `results/`
 and `workspace/` are git-ignored. The 3D viewers and the map load plotly.js from
-the app itself (`/static/plotly.min.js`), so they work offline and under a
-strict CSP.
+the app itself (`static/plotly.min.js`, a relative URL like every other URL
+the app renders, so the pages also work under `PINN_WEBAPP_BASE_PATH`), so
+they work offline and under a strict CSP.
 
 ## Security / deployment status
 
