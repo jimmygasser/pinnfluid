@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
 import urllib.error
 import webbrowser
@@ -50,6 +51,18 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # The DEM/structure helper scripts (dem_prep, place_structure, finalize_domain)
 # are invoked as subprocesses and live next to this file.
 _DOMAIN_PREP_DIR = Path(__file__).resolve().parent
+
+# Structure geometries a request may name: the STL files shipped in single_stl/.
+STRUCTURE_DIR = ROOT / "single_stl"
+STRUCTURE_TYPES = frozenset(p.name for p in STRUCTURE_DIR.glob("*.stl") if p.is_file())
+
+
+def structure_stl_path(type_name) -> Path:
+    """The shipped STL of a structure type ("cube.stl"); ValueError for anything
+    else, so a request cannot name a file outside single_stl/."""
+    if not isinstance(type_name, str) or type_name not in STRUCTURE_TYPES:
+        raise ValueError(f"unknown structure type {type_name!r}")
+    return STRUCTURE_DIR / type_name
 
 # Available structures (display_name -> stl filename)
 STRUCTURES = {
@@ -1481,6 +1494,17 @@ STAC_URL = (
     "https://data.geo.admin.ch/api/stac/v1/collections/"
     "ch.swisstopo.swissalti3d/items"
 )
+# The only host STAC pages and DEM tiles are fetched from (over HTTPS): a STAC
+# response cannot send the server to another host.
+STAC_HOST = "data.geo.admin.ch"
+
+
+def _is_stac_host_url(url) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return False
+    return parts.scheme == "https" and parts.hostname == STAC_HOST and parts.port is None
 
 def query_stac_tiles(west, south, east, north, resolution="2"):
     import re
@@ -1497,12 +1521,18 @@ def query_stac_tiles(west, south, east, north, resolution="2"):
         for feature in data.get("features", []):
             for asset_key, asset in feature.get("assets", {}).items():
                 if f"_{resolution}_2056_5728.tif" in asset_key:
-                    all_tiles.append({"name": asset_key, "href": asset["href"]})
+                    if _is_stac_host_url(asset.get("href")) and os.path.basename(asset_key) == asset_key:
+                        all_tiles.append({"name": asset_key, "href": asset["href"]})
+                    else:
+                        print(f"[WARN] STAC asset skipped (not on {STAC_HOST})", file=sys.stderr)
                     break
         url = None
         for link in data.get("links", []):
             if link.get("rel") == "next":
-                url = link["href"]
+                if _is_stac_host_url(link.get("href")):
+                    url = link["href"]
+                else:
+                    print(f"[WARN] STAC next page skipped (not on {STAC_HOST})", file=sys.stderr)
                 break
 
     # Deduplicate: same tile coordinates (EEEE-NNNN) appear with different years.
@@ -1525,6 +1555,9 @@ def download_tiles(tiles, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     downloaded = failed = 0
     for i, tile in enumerate(tiles, 1):
+        if not _is_stac_host_url(tile.get("href")) or os.path.basename(tile["name"]) != tile["name"]:
+            print(f"  [{i}/{len(tiles)}] refused: not a {STAC_HOST} tile"); failed += 1
+            continue
         filepath = os.path.join(output_dir, tile["name"])
         if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
             downloaded += 1; continue
@@ -1556,7 +1589,7 @@ def merge_and_crop(output_dir, e_min, n_min, e_max, n_max, nodata=-9999.0):
     tif_files = sorted(glob.glob(os.path.join(output_dir, "swissalti3d_*.tif")))
     if not tif_files:
         raise FileNotFoundError(f"No .tif files in {output_dir}")
-    srcs = [rasterio.open(f) for f in tif_files]
+    srcs = [rasterio.open(f, driver="GTiff") for f in tif_files]
     mosaic, mosaic_transform = rasterio_merge(srcs, nodata=nodata)
     profile = srcs[0].profile.copy()
     for s in srcs: s.close()
@@ -1567,7 +1600,7 @@ def merge_and_crop(output_dir, e_min, n_min, e_max, n_max, nodata=-9999.0):
     with rasterio.open(merged_path, "w", **profile) as dst:
         dst.write(mosaic[0].astype(np.float32), 1)
     cropped_path = os.path.join(output_dir, "dem_cropped.tif")
-    with rasterio.open(merged_path) as src:
+    with rasterio.open(merged_path, driver="GTiff") as src:
         b = src.bounds
         cl = max(e_min, b.left); cb = max(n_min, b.bottom)
         cr = min(e_max, b.right); ct = min(n_max, b.top)
@@ -1585,7 +1618,7 @@ def merge_and_crop(output_dir, e_min, n_min, e_max, n_max, nodata=-9999.0):
     w_m = cr - cl; h_m = ct - cb
     return cropped_path, w_m, h_m
 
-def register_custom_dem(name, dem_bytes, dem_root, max_size_m=3000.0):
+def register_custom_dem(name, dem_bytes, dem_root, max_size_m=3000.0, max_pixels=None):
     """Register a user-uploaded GeoTIFF as `dem/<name>/dem_cropped.tif`.
 
     The DEM must be in a projected CRS in metres (any — LV95, UTM, ETRS89/LAEA,
@@ -1596,6 +1629,12 @@ def register_custom_dem(name, dem_bytes, dem_root, max_size_m=3000.0):
 
     Returns:
       {bounds_crs:[W,S,E,N], width_m, height_m, crs_str, png_base64}
+
+    The file is opened as a GeoTIFF only (GDAL would otherwise pick the format from
+    the content: a VRT could read other files on the server or fetch URLs). With
+    `max_pixels`, a raster with more pixels, or a larger block, is refused from its
+    header, before any pixel is decoded (a small compressed file can expand to
+    gigabytes).
     """
     import base64
     import io
@@ -1609,7 +1648,19 @@ def register_custom_dem(name, dem_bytes, dem_root, max_size_m=3000.0):
     with open(tmp_path, "wb") as f:
         f.write(dem_bytes)
     try:
-        with rasterio.open(tmp_path) as src:
+        try:
+            src = rasterio.open(tmp_path, driver="GTiff")
+        except rasterio.errors.RasterioIOError as exc:
+            raise ValueError("the uploaded file is not a GeoTIFF") from exc
+        with src:
+            if max_pixels:
+                if src.width * src.height > max_pixels:
+                    raise ValueError(
+                        f"DEM has {src.width}x{src.height} pixels, over the "
+                        f"{max_pixels:,} pixel limit. Resample it in QGIS/GDAL before upload."
+                    )
+                if any(bh * bw > max_pixels for bh, bw in src.block_shapes):
+                    raise ValueError("DEM block size exceeds the pixel limit")
             if src.crs is None:
                 raise ValueError("DEM has no CRS — must be a projected GeoTIFF (LV95, UTM, ...)")
             crs = src.crs
@@ -1829,7 +1880,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
             json.dump(positions, f, indent=2)
 
         # All same structure type? Use first type for now
-        stl_file = ROOT / "single_stl" / struct_list[0]["type"]
+        stl_file = structure_stl_path(struct_list[0]["type"])
         yaw = struct_list[0].get("yaw", 0)
 
         print(f"[BUILD] Placing {len(struct_list)} structure(s)...")
@@ -1865,7 +1916,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
                       and grid_center.get("crs_y") is not None)
         gc_has_ll = (grid_center and grid_center.get("lat") and grid_center.get("lng"))
         if gc_has_crs or gc_has_ll:
-            grid_stl = ROOT / "single_stl" / grid["type"]
+            grid_stl = structure_stl_path(grid["type"])
             if gc_has_crs:
                 grid_e, grid_n = float(grid_center["crs_x"]), float(grid_center["crs_y"])
             else:
@@ -1918,7 +1969,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
         if ground_stl.exists() and domain_spec.exists():
             with open(domain_spec) as f:
                 spec = json.load(f)
-            orig_stl = ROOT / "single_stl" / struct_list[0]["type"]
+            orig_stl = structure_stl_path(struct_list[0]["type"])
             if orig_stl.exists():
                 orig = trimesh.load_mesh(str(orig_stl))
                 # Center the flatten region on the structure's BASE footprint, not
@@ -1992,7 +2043,7 @@ def build_domain(domain_name, domain_size, wind_from, flat_terrain,
     struct_bounds = []
     if struct_list:
         # Get original structure extents (before placement)
-        stl_file = ROOT / "single_stl" / struct_list[0]["type"]
+        stl_file = structure_stl_path(struct_list[0]["type"])
         if stl_file.exists():
             orig = trimesh.load_mesh(str(stl_file))
             orig_ext = orig.extents  # [dx, dy, dz]

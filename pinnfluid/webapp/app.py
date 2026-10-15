@@ -41,6 +41,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 ROOT = SCRIPTS_DIR.parent
 
+# GDAL settings for user files (inherited by the terrain subprocesses): do not
+# list a raster's directory looking for side-car files, and fetch nothing over
+# /vsicurl/. User files are also opened with the GeoTIFF driver only.
+os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".none")
+
 for extra in (SCRIPTS_DIR, SCRIPTS_DIR / "domain_prep", SCRIPTS_DIR / "input_prep"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
@@ -82,6 +88,7 @@ GITHUB_URL = os.environ.get(
 
 from domain_builder import (  # type: ignore  noqa: E402
     HTML_TEMPLATE as BUILDER_HTML,
+    structure_stl_path,
     download_tiles,
     lv95_to_wgs84_point,
     merge_and_crop,
@@ -138,7 +145,21 @@ def _safe_name(raw) -> str:
     s = str(raw or "").strip().replace("/", "_").replace("\\", "_")
     if not s or s.startswith(".") or ".." in s:
         raise ValueError(f"invalid domain name: {raw!r}")
+    if len(s) > 128:  # on-disk names: namespace + user name + wind-rose suffix
+        raise ValueError("the domain name is too long")
     return s
+
+
+_MAX_NAME_LENGTH = 64  # a name as the user types it
+
+
+def _check_structure_type(item: dict) -> None:
+    """A structure or grid names one of the shipped single_stl/*.stl files (or none)."""
+    if "type" in item:
+        try:
+            structure_stl_path(item["type"])
+        except ValueError:
+            raise ValueError(f"unknown structure type: {str(item['type'])[:80]!r}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +190,11 @@ def _session_name(namespace: str, raw) -> str:
     """
     name = _safe_name(raw)
     prefix = namespace + "_"
-    return name if name.startswith(prefix) else prefix + name
+    if name.startswith(prefix):
+        return name
+    if len(name) > _MAX_NAME_LENGTH:
+        raise ValueError(f"the domain name is longer than {_MAX_NAME_LENGTH} characters")
+    return prefix + name
 
 
 def _display_name(name: str) -> str:
@@ -353,6 +378,7 @@ def _validate_compute_request(body: dict) -> None:
             raise ValueError("structure yaw must be numeric") from exc
         if not math.isfinite(yaw):
             raise ValueError("structure yaw must be finite")
+        _check_structure_type(structure)
 
     sampling_points = body.get("sampling_points") or []
     if not isinstance(sampling_points, list) or len(sampling_points) > 10:
@@ -362,6 +388,7 @@ def _validate_compute_request(body: dict) -> None:
     if grid is not None:
         if not isinstance(grid, dict):
             raise ValueError("grid must be an object")
+        _check_structure_type(grid)
         try:
             rows = int(grid.get("rows", 0))
             cols = int(grid.get("cols", 0))
@@ -3243,7 +3270,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     cleanup_case(name)
                 except Exception:
                     pass
-                info = register_custom_dem(name, dem_bytes, dem_root=self.dem_root)
+                info = register_custom_dem(
+                    name, dem_bytes, dem_root=self.dem_root,
+                    max_pixels=_env_nonnegative_int("PINN_WEBAPP_MAX_DEM_PIXELS", 4_000_000),
+                )
                 self._json({
                     "success": True,
                     "width_m": info["width_m"],

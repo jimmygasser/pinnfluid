@@ -64,10 +64,9 @@ _FLOW = _PRELUDE + textwrap.dedent("""
     z = 1000.0 + 0.05 * xx + 3.0 * np.sin(xx / 25.0) * np.cos(yy / 30.0)
     with MemoryFile() as mem:
         with mem.open(driver="GTiff", width=n, height=n, count=1, dtype="float32",
-                      crs="EPSG:32632", transform=from_origin(x0, y0, px, px),
-                      # tiled: dem_prep rewrites the raster with tiled=True and the
-                      # source's block size, which must then be a multiple of 16
-                      tiled=True, blockxsize=128, blockysize=128) as dst:
+                      crs="EPSG:32632", transform=from_origin(x0, y0, px, px)) as dst:
+            # striped, as GDAL and QGIS write by default (the terrain
+            # preparation accepts any block layout)
             dst.write(z, 1)
         tif = mem.read()
 

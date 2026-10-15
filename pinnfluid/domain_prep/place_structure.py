@@ -163,7 +163,7 @@ def crs_to_local(crs_x: float, crs_y: float, dem_tif: str,
         crs_y = pivot_y + dx * sin_t + dy * cos_t
 
     # Now do simple offset conversion using dem_final.tif bounds
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         tf = src.transform
         ny, nx = src.height, src.width
         px = tf.a
@@ -192,7 +192,7 @@ def sample_terrain_elevation(dem_tif: str, crs_x: float, crs_y: float,
     """
     crs_x, crs_y = _to_dem_sample_crs(dem_tif, crs_x, crs_y, transform_json=transform_json)
 
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         # rasterio row/col from (rotated) CRS coords
         r, c = rowcol(src.transform, crs_x, crs_y, op=float)
         r = float(r)
@@ -244,7 +244,7 @@ def local_to_crs(local_x: float, local_y: float, dem_tif: str,
 
     Handles rotated DEMs by applying the inverse rotation.
     """
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         tf = src.transform
         ny = src.height
         px = tf.a
@@ -364,7 +364,7 @@ def check_slope_at_point(dem_tif: str, crs_x: float, crs_y: float,
                           nodata: float = -9999.0) -> Tuple[float, bool]:
     """Estimate local terrain slope (degrees) at placement point."""
     crs_x, crs_y = _to_dem_sample_crs(dem_tif, crs_x, crs_y)
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         Z = src.read(1).astype(np.float32)
         Z[Z == nodata] = np.nan
         px = src.transform.a
@@ -392,7 +392,7 @@ def terrain_gradient_at_point(dem_tif: str, crs_x: float, crs_y: float,
                               nodata: float = -9999.0) -> Tuple[float, float, float]:
     """Return dz/dx, dz/dy and slope angle in local DEM axes."""
     crs_x, crs_y = _to_dem_sample_crs(dem_tif, crs_x, crs_y)
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         Z = src.read(1).astype(np.float32)
         Z[Z == nodata] = np.nan
         px = src.transform.a

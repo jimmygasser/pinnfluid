@@ -459,7 +459,7 @@ def _load_hires_terrain(meta: dict, fallback_xy: np.ndarray, *, realworld_elev: 
         src = Path(src_path)
         if src.exists() and src.suffix.lower() in {".tif", ".tiff"}:
             try:
-                with rasterio.open(src) as ds:
+                with rasterio.open(src, driver="GTiff") as ds:
                     scale = max(ds.width / MAX_HIRES_TERRAIN_PIX, ds.height / MAX_HIRES_TERRAIN_PIX, 1.0)
                     out_w = max(2, int(math.ceil(ds.width / scale)))
                     out_h = max(2, int(math.ceil(ds.height / scale)))

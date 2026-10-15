@@ -334,7 +334,7 @@ def choose_vertical_profile(category: str, requested: str, *, grid_kind: str = "
 
 
 def load_dem_surface(dem_path: Path, *, z_offset_applied: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    with rasterio.open(dem_path) as src:
+    with rasterio.open(dem_path, driver="GTiff") as src:
         z = src.read(1).astype(np.float32)
         nodata = src.nodata if src.nodata is not None else -9999.0
         if np.isfinite(nodata):

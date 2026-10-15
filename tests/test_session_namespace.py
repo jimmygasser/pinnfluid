@@ -276,7 +276,7 @@ class IsolationTests(SessionTestCase):
     def test_terrain_uploads_are_namespaced(self):
         seen = []
 
-        def fake_register(name, dem_bytes, dem_root):
+        def fake_register(name, dem_bytes, dem_root, **_):
             seen.append((name, dem_root))
             return {"width_m": 1.0, "height_m": 1.0, "bounds_crs": [0, 0, 1, 1],
                     "crs": "EPSG:32632", "png_base64": ""}

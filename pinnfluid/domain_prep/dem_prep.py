@@ -161,7 +161,7 @@ def merge_tifs(tif_paths: List[str], out_tif: str, input_nodata: Optional[float]
     if len(tif_paths) == 0:
         raise ValueError("No input TIFs provided.")
 
-    srcs = [rasterio.open(p) for p in tif_paths]
+    srcs = [rasterio.open(p, driver="GTiff") for p in tif_paths]
 
     # Determine nodata to use for merge
     if input_nodata is None:
@@ -169,17 +169,24 @@ def merge_tifs(tif_paths: List[str], out_tif: str, input_nodata: Optional[float]
 
     mosaic, transform = merge(srcs, nodata=input_nodata)  # mosaic shape: (bands, H, W)
 
-    # Use first raster profile as template
-    profile = srcs[0].profile.copy()
-    profile.update(
-        height=mosaic.shape[1],
-        width=mosaic.shape[2],
-        transform=transform,
-        count=1,
-        nodata=input_nodata,
-        compress="lzw",
-        tiled=True,
-    )
+    # A fresh single-band float32 GeoTIFF profile. Copying the first source's
+    # profile carried its block size (a striped GeoTIFF has blocks as wide as the
+    # image and a few rows high), its data type and its photometric settings into
+    # a tiled float32 file, which GDAL refuses ("Bad value ... for TileWidth").
+    profile = {
+        "driver": "GTiff",
+        "dtype": "float32",
+        "count": 1,
+        "height": mosaic.shape[1],
+        "width": mosaic.shape[2],
+        "crs": srcs[0].crs,
+        "transform": transform,
+        "nodata": input_nodata,
+        "compress": "lzw",
+        "tiled": True,
+        "blockxsize": 256,
+        "blockysize": 256,
+    }
 
     # If merged array has multiple bands, take first
     data = mosaic[0].astype(np.float32)
@@ -285,7 +292,7 @@ def rotate_dem_to_tif(
     # becomes CW in row/col. Flip sign for the actual pixel-space rotation.
     theta_deg = -theta_math_deg
 
-    with rasterio.open(input_tif) as src:
+    with rasterio.open(input_tif, driver="GTiff") as src:
         if src.crs is None:
             raise ValueError("Input GeoTIFF has no CRS.")
 
@@ -397,7 +404,7 @@ def crop_rotated_dem(
     bottom = cy - halfH
     top = cy + halfH
 
-    with rasterio.open(rotated_tif) as src:
+    with rasterio.open(rotated_tif, driver="GTiff") as src:
         win = from_bounds(left, bottom, right, top, transform=src.transform)
         arr = src.read(1, window=win).astype(np.float32)
         out_transform = src.window_transform(win)
@@ -631,7 +638,7 @@ def dem_to_stl(
     if stl_mesh is None:
         raise ImportError("numpy-stl is required for STL export: pip install numpy-stl")
 
-    with rasterio.open(dem_tif) as src:
+    with rasterio.open(dem_tif, driver="GTiff") as src:
         Z = src.read(1).astype(np.float32)
         tf = src.transform
 
@@ -907,7 +914,7 @@ def main() -> None:
     merge_tifs(tif_paths, merged_tif, input_nodata=args.input_nodata)
 
     def _compute_z_range(tif_path: str, nodata_val: float) -> Tuple[float, float]:
-        with rasterio.open(tif_path) as src:
+        with rasterio.open(tif_path, driver="GTiff") as src:
             Z = src.read(1).astype(np.float32)
         if np.isfinite(nodata_val):
             Z = np.where(Z == nodata_val, np.nan, Z)
@@ -962,7 +969,7 @@ def main() -> None:
             theta_mod = abs(theta_deg) % 360
             is_axis_aligned = any(abs(theta_mod - a) < 1e-3 for a in (0, 90, 180, 270, 360))
 
-            with rasterio.open(merged_tif) as src:
+            with rasterio.open(merged_tif, driver="GTiff") as src:
                 b = src.bounds
                 if is_axis_aligned:
                     # For 90°/270° rotation of WxH, the footprint becomes HxW
@@ -1019,7 +1026,7 @@ def main() -> None:
 
         else:
             # Mode B: maximum possible within provided mosaic (after rotation)
-            with rasterio.open(rotated_tif) as src:
+            with rasterio.open(rotated_tif, driver="GTiff") as src:
                 # shrink away nodata borders created by rotation
                 if pivot_xy is not None:
                     try:
@@ -1035,7 +1042,7 @@ def main() -> None:
                     used_thresh = False
 
             # Write this max-valid window as final_tif
-            with rasterio.open(rotated_tif) as src:
+            with rasterio.open(rotated_tif, driver="GTiff") as src:
                 win = from_bounds(xmin, ymin, xmax, ymax, transform=src.transform)
                 arr = src.read(1, window=win).astype(np.float32)
                 out_transform = src.window_transform(win)

@@ -75,6 +75,7 @@ Environment variables (all optional):
 | `PINN_WEBAPP_MAX_ROSE_SECTORS` | 16 | maximum directions in one wind-rose job                    |
 | `PINN_WEBAPP_MAX_REQUEST_MB` | 32 | maximum JSON request body                                   |
 | `PINN_WEBAPP_MAX_UPLOAD_MB` | 20 | maximum decoded custom GeoTIFF                              |
+| `PINN_WEBAPP_MAX_DEM_PIXELS` | 4000000 | maximum pixels of a custom GeoTIFF, read from its header before decoding (0 disables) |
 | `PINN_WEBAPP_MAX_DOMAIN_M` | 3000 | maximum terrain width and height                            |
 | `PINN_WEBAPP_MAX_SINGLE_STRUCTURES` | 10 | maximum individually placed structures                 |
 | `PINN_WEBAPP_ENABLE_RUN_INDEX` | 0 | expose the shared `/runs` index when set to 1              |
@@ -113,8 +114,12 @@ unpkg CDN.
 ## Security / deployment status
 
 Bound to `127.0.0.1` by default and **no authentication**. Domain names are
-sanitised against path traversal, HTML endpoints escape user input, request and
-DEM sizes are bounded, and terrain/prediction operations have optional
+sanitised against path traversal and structure types must be shipped
+`single_stl/*.stl` files. Uploaded DEMs are opened as GeoTIFF only (never VRT or
+another GDAL format), with the GDAL defaults `GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR`
+and `CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.none`, and their pixel count is checked
+before decoding. DEM tiles are fetched only from `https://data.geo.admin.ch`.
+HTML endpoints escape user input, request and DEM sizes are bounded, and terrain/prediction operations have optional
 process-wide admission limits. Each browser gets a random session id in an
 HttpOnly cookie (`pinnfluid_session`, scoped to the base path); its domains are
 stored under a namespace derived from it, so results, terrain and jobs
