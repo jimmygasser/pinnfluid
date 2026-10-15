@@ -85,6 +85,7 @@ Environment variables (all optional):
 | `PINN_WEBAPP_WORK_DIR` | (checkout) | absolute dir for everything the app writes: `dem/`, `workspace/`, `results/` (the source tree can then be read-only) |
 | `PINN_WEBAPP_RESULTS_DIR` | (local) | saved-runs dir; point at a mounted volume in a container (overrides `<work dir>/results`) |
 | `PINN_WEBAPP_BASE_PATH` | (root) | URL prefix behind a gateway, e.g. `/pinnfluid`: the app answers only under it (404 elsewhere) |
+| `PINN_WEBAPP_SECURE_COOKIE` | 0 | set to 1 behind HTTPS: the session cookie gets the `Secure` flag |
 
 `models.yaml` (next to `app.py`) is the file equivalent of `PINN_WEBAPP_MODELS`
 and also sets the default model. On a CPU-only host, serve the fast hybrid only:
@@ -114,8 +115,13 @@ unpkg CDN.
 Bound to `127.0.0.1` by default and **no authentication**. Domain names are
 sanitised against path traversal, HTML endpoints escape user input, request and
 DEM sizes are bounded, and terrain/prediction operations have optional
-process-wide admission limits. The shared past-run index is disabled by
-default; result URLs remain unlisted rather than access-controlled. There is no
+process-wide admission limits. Each browser gets a random session id in an
+HttpOnly cookie (`pinnfluid_session`, scoped to the base path); its domains are
+stored under a namespace derived from it, so results, terrain and jobs
+(`/job_status`) of one session are not reachable from another, even with the same
+domain name (they answer 404). The past-run index, disabled by default, lists the
+session's own runs only. Results still live only as long as the server keeps
+them (`PINN_WEBAPP_MAX_RUNS`, `PINN_WEBAPP_MAX_GB`). There is no
 CSRF protection and the in-process limits are not DDoS-grade. Follow
 `DEPLOY.md` before exposing the app publicly; use authentication or Cloud Armor
 if stronger per-user enforcement becomes necessary.

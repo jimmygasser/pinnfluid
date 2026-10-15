@@ -73,13 +73,23 @@ _FLOW = _PRELUDE + textwrap.dedent("""
 
     server = app.http.server.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    jar = {}  # one browser session: the cookie of the first response
+
+    def send(method, path, payload=None, timeout=600):
+        conn = http.client.HTTPConnection(*server.server_address, timeout=timeout)
+        headers = {"Content-Type": "application/json"}
+        if jar:
+            headers["Cookie"] = jar["cookie"]
+        conn.request(method, path, body=None if payload is None else json.dumps(payload),
+                     headers=headers)
+        r = conn.getresponse()
+        if r.getheader("Set-Cookie"):
+            jar["cookie"] = r.getheader("Set-Cookie").split(";", 1)[0]
+        return r.status, r.read()
 
     def post(path, payload):
-        conn = http.client.HTTPConnection(*server.server_address, timeout=600)
-        conn.request("POST", path, body=json.dumps(payload),
-                     headers={"Content-Type": "application/json"})
-        r = conn.getresponse()
-        return r.status, json.loads(r.read())
+        status, body = send("POST", path, payload)
+        return status, json.loads(body)
 
     out = {}
     out["upload"] = post("/upload_dem", {
@@ -98,20 +108,17 @@ _FLOW = _PRELUDE + textwrap.dedent("""
     out["predict"] = post("/predict", BUILD_BODY)
     job = {}
     for _ in range(1200):
-        conn = http.client.HTTPConnection(*server.server_address, timeout=30)
-        conn.request("GET", "/job_status?id=" + out["predict"][1].get("job_id", ""))
-        job = json.loads(conn.getresponse().read())
+        _, body = send("GET", "/job_status?id=" + out["predict"][1].get("job_id", ""), timeout=30)
+        job = json.loads(body)
         if job.get("state") in ("done", "error"):
             break
         time.sleep(0.5)
     out["job"] = [job.get("state"), job.get("error")]
     # the viewers render on first open and are cached next to the run
     for view in ("map", "view_3d"):
-        conn = http.client.HTTPConnection(*server.server_address, timeout=600)
-        conn.request("GET", f"/{view}?domain=wd-case")
-        r = conn.getresponse()
-        page = r.read().decode("utf-8", "replace")
-        out[view] = [r.status, 'src="static/plotly.min.js"' in page]
+        status, body = send("GET", f"/{view}?domain=wd-case")
+        out[view] = [status, 'src="static/plotly.min.js"' in body.decode("utf-8", "replace")]
+    out["namespace"] = app._session_namespace(jar["cookie"].split("=", 1)[1])
     server.shutdown()
     for step in ("upload", "build"):
         status, body = out[step]
@@ -212,13 +219,14 @@ class WorkDirFlowTests(unittest.TestCase):
         self.assertEqual(out["build"][0], 200, out)
         self.assertTrue(out["build"][1]["success"], out)
         self.assertTrue(out["build"][1]["cfd_dir"].startswith(str(work / "workspace")), out)
-        self.assertIn(os.path.join("dem", "wd-case", "dem_cropped.tif"), written)
+        case = f"{out['namespace']}_wd-case"  # the session's name for it
+        self.assertIn(os.path.join("dem", case, "dem_cropped.tif"), written)
         # the build happened in workspace/ (cfd_dir above), which predict cleans up
         self.assertEqual([p for p in written if p.startswith("workspace" + os.sep)], [], written)
         self.assertEqual(out["job"], ["done", None], out)
-        self.assertIn(os.path.join("results", "wd-case", "report.pdf"), written)
-        self.assertIn(os.path.join("results", "wd-case", "map.html"), written)
-        self.assertIn(os.path.join("results", "wd-case", "view_3d.html"), written)
+        self.assertIn(os.path.join("results", case, "report.pdf"), written)
+        self.assertIn(os.path.join("results", case, "map.html"), written)
+        self.assertIn(os.path.join("results", case, "view_3d.html"), written)
         self.assertEqual(out["map"], [200, True], out)
         self.assertEqual(out["view_3d"], [200, True], out)
         self.assertEqual(snapshot(ROOT), before, "files written or changed in the source tree")

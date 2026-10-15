@@ -117,10 +117,13 @@ class BasePathHttpTests(unittest.TestCase):
             app._JOBS.clear()
             app._JOB_SUBMISSIONS.clear()
 
-    def request(self, method: str, path: str, body: bytes | None = None):
+    def request(self, method: str, path: str, body: bytes | None = None, cookie: str = ""):
         conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        headers = {"Content-Type": "application/json"}
+        if cookie:
+            headers["Cookie"] = cookie
         try:
-            conn.request(method, path, body=body, headers={"Content-Type": "application/json"})
+            conn.request(method, path, body=body, headers=headers)
             response = conn.getresponse()
             return response.status, dict(response.getheaders()), response.read()
         finally:
@@ -166,13 +169,17 @@ class BasePathHttpTests(unittest.TestCase):
             return {"success": True, "domain": body["domain_name"]}
 
         with patch.object(app, "_run_predict", side_effect=fake_predict):
-            status, _, body = self.request(
+            status, headers, body = self.request(
                 "POST", "/pinnfluid/predict", json.dumps(VALID_BODY).encode())
             self.assertEqual(status, 200, body)
             job_id = json.loads(body)["job_id"]
+            # the session cookie of the new session, scoped to the prefix
+            cookie, _, attrs = headers["Set-Cookie"].partition(";")
+            self.assertIn("Path=/pinnfluid/", attrs)
             job = {}
             for _ in range(100):
-                status, _, body = self.request("GET", f"/pinnfluid/job_status?id={job_id}")
+                status, _, body = self.request("GET", f"/pinnfluid/job_status?id={job_id}",
+                                               cookie=cookie)
                 self.assertEqual(status, 200)
                 job = json.loads(body)
                 if job["state"] in ("done", "error"):

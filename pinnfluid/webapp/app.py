@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -138,6 +139,54 @@ def _safe_name(raw) -> str:
     if not s or s.startswith(".") or ".." in s:
         raise ValueError(f"invalid domain name: {raw!r}")
     return s
+
+
+# ---------------------------------------------------------------------------
+# Per-session namespace: one browser cannot see another one's domains or jobs
+# ---------------------------------------------------------------------------
+# Every browser gets a random 128-bit id in an HttpOnly cookie. A domain the user
+# calls "site" lives on disk as "<namespace>_site" (dem/, workspace/, results/),
+# where the namespace is derived from the id, so two people who both pick "site"
+# never share terrain, inputs or results, and nobody can open another session's
+# results by guessing a name. Responses show the name as the user typed it.
+SESSION_COOKIE = "pinnfluid_session"
+_SESSION_ID_RE = re.compile(r"[0-9a-f]{32}")
+_NAMESPACE_PREFIX_RE = re.compile(r"^[0-9a-f]{16}_")
+
+
+def _session_namespace(session_id: str) -> str:
+    """16 hex characters derived from the session id (they do not reveal it, so
+    on-disk names and logs carry no credential)."""
+    return hashlib.sha256(session_id.encode("ascii")).hexdigest()[:16]
+
+
+def _session_name(namespace: str, raw) -> str:
+    """The on-disk name of a user's domain: <namespace>_<domain>.
+
+    A name that already carries this session's namespace is kept as it is: the
+    wind-rose selector, the ROI chooser and the run index link with on-disk names.
+    Another session's namespace is just part of the name, so it stays out of reach.
+    """
+    name = _safe_name(raw)
+    prefix = namespace + "_"
+    return name if name.startswith(prefix) else prefix + name
+
+
+def _display_name(name: str) -> str:
+    """The domain name as the user typed it (for titles, reports and file names)."""
+    return _NAMESPACE_PREFIX_RE.sub("", name, count=1)
+
+
+def _public(value, namespace: str):
+    """`value` (a JSON payload) with the session's namespace removed from every string."""
+    prefix = namespace + "_"
+    if isinstance(value, str):
+        return value.replace(prefix, "")
+    if isinstance(value, dict):
+        return {k: _public(v, namespace) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_public(v, namespace) for v in value]
+    return value
 
 
 # Leaflet 1.9.4 and leaflet-draw 1.0.4, served by the app from static/vendor/
@@ -361,7 +410,7 @@ def _validate_dem_bounds(body: dict) -> tuple[float, float, float, float]:
     return west, south, east, north
 
 
-def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
+def _job_admit_and_create(kind: str, session: Optional[str] = None) -> tuple[Optional[str], str, int]:
     """Apply process-local cost guards and atomically reserve a heavy job.
 
     Cloud Run is deployed with one instance, so a global limit is deliberate:
@@ -388,7 +437,7 @@ def _job_admit_and_create(kind: str) -> tuple[Optional[str], str, int]:
             _JOB_SUBMISSIONS.append(now)
         jid = uuid.uuid4().hex[:12]
         _JOBS[jid] = {
-            "id": jid, "kind": kind, "state": "queued",
+            "id": jid, "kind": kind, "state": "queued", "session": session,
             "message": "queued…", "created": time.time(),
             "result": None, "error": None,
         }
@@ -1952,7 +2001,8 @@ def _run_predict(body: dict, progress: Optional[Callable[[str], None]] = None) -
                       if v.get("path") and Path(v["path"]).exists()]
         if not plot_paths:  # defensive fallback
             plot_paths = _order_plot_paths(plots_dir.glob("*.png"))
-        write_pdf_report(pdf_path, domain_name=name, stats=stats, plot_paths=plot_paths)
+        write_pdf_report(pdf_path, domain_name=_display_name(name), stats=stats,
+                         plot_paths=plot_paths)
     except Exception as e:
         print(f"[predict_web] PDF warning: {e}", flush=True)
         traceback.print_exc()
@@ -2266,7 +2316,7 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
         except Exception:
             sec_stats = {}
         sections.append({
-            "label": rec["domain"],
+            "label": _display_name(rec["domain"]),
             "dir_deg": rec["dir_deg"],
             "governing": governing,
             "stats": sec_stats,
@@ -2277,7 +2327,7 @@ def _run_rose(body: dict, progress: Optional[Callable[[str], None]] = None) -> d
     try:
         write_rose_pdf_report(
             out_dir / "report.pdf",
-            domain_name=name,
+            domain_name=_display_name(name),
             summary=summary,
             rose_png_path=out_dir / "plots" / "wind_rose.png",
             sections=sections,
@@ -2325,7 +2375,7 @@ def _rose_direction_wrapper_html(
     first = quote(str(secs[0]["domain"]))
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{_html.escape(heading)} — {_html.escape(name)} (wind rose)</title>"
+        f"<title>{_html.escape(heading)} — {_html.escape(_display_name(name))} (wind rose)</title>"
         "<style>body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;}"
         "#bar{padding:8px 14px;background:#0d47a1;color:#fff;display:flex;gap:10px;align-items:center;}"
         "select{padding:5px;border-radius:5px;border:none;font-size:14px;}"
@@ -2333,7 +2383,7 @@ def _rose_direction_wrapper_html(
         "#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;"
         "background:#fff;color:#555;font-size:14px;z-index:2;}"
         "iframe{border:none;width:100%;height:100%;}</style></head><body>"
-        f"<div id='bar'><b>{_html.escape(heading)} — {_html.escape(name)}</b>"
+        f"<div id='bar'><b>{_html.escape(heading)} — {_html.escape(_display_name(name))}</b>"
         "<label for='dirSel'>Wind direction:</label>"
         "<select id='dirSel' onchange='loadDirection(this.value)'>"
         + "".join(opts) +
@@ -2369,10 +2419,13 @@ def _rose_map_wrapper_html(name: str) -> str:
     )
 
 
-def _runs_index_html() -> str:
-    """Server-rendered 'past runs' index over RESULTS_DIR."""
+def _runs_index_html(namespace: Optional[str] = None) -> str:
+    """Server-rendered 'past runs' index over RESULTS_DIR (one session's runs only
+    when `namespace` is given)."""
     rows = []
     dirs = [d for d in RESULTS_DIR.iterdir() if d.is_dir()] if RESULTS_DIR.exists() else []
+    if namespace is not None:
+        dirs = [d for d in dirs if d.name.startswith(namespace + "_")]
     dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs:
         stats = {}
@@ -2382,7 +2435,7 @@ def _runs_index_html() -> str:
                 stats = json.loads(sp.read_text())
         except Exception:
             stats = {}
-        name_esc = _html.escape(d.name)
+        name_esc = _html.escape(_display_name(d.name))
         name_url = quote(d.name)
         g = stats.get("global") or {}
         max_u = (g.get("max_umag") or {}).get("value_mps")
@@ -2461,7 +2514,7 @@ def _render_vtk_zip(name: str) -> Path:
     vtk_dir = RESULTS_DIR / name / "vtk"
     info = export_prediction_vtk(
         vtk_dir,
-        domain_name=name,
+        domain_name=_display_name(name),
         global_bundle=saved["bundle"],
         global_pred_flow=saved["pred_flow"],
         roi_bundles=saved.get("roi_bundles"),
@@ -2503,7 +2556,7 @@ def _render_npz_zip(name: str) -> bytes:
     npz_dir = RESULTS_DIR / name / "npz"
     info = export_prediction_npz(
         npz_dir,
-        domain_name=name,
+        domain_name=_display_name(name),
         global_bundle=saved["bundle"],
         global_pred_flow=saved["pred_flow"],
         roi_bundles=saved.get("roi_bundles"),
@@ -2541,7 +2594,7 @@ def _ensure_map_html(name: str) -> Path:
     write_map_html(
         out_path,
         case_dir=cfd_dir,
-        domain_name=name,
+        domain_name=_display_name(name),
         pred_flow=display["pred_flow"],
         roi_pred_flows=display.get("roi_preds"),
         transform_meta=saved.get("transform_meta"),
@@ -2567,7 +2620,7 @@ def _ensure_3d_html(name: str) -> Path:
     write_3d_html(
         out_path,
         saved_inputs=saved,
-        domain_name=name,
+        domain_name=_display_name(name),
         structure_stl_path=structure_stl if structure_stl.exists() else None,
         satellite=_satellite_for(name, saved),
     )
@@ -2603,7 +2656,7 @@ def _ensure_structure_3d_html(name: str, roi_label: Optional[str] = None) -> Pat
     write_structure_3d_html(
         out_path,
         saved_inputs=saved,
-        domain_name=name,
+        domain_name=_display_name(name),
         structure_stl_path=structure_stl if structure_stl.exists() else None,
         roi_label=roi_label,
         satellite=_satellite_provider_for(name, saved, m_per_px=0.25),
@@ -2613,7 +2666,7 @@ def _ensure_structure_3d_html(name: str, roi_label: Optional[str] = None) -> Pat
 
 def _structure_roi_chooser_html(name: str, labels: list[str]) -> str:
     """Render a tiny chooser page when multiple ROIs exist."""
-    name_esc = _html.escape(name)
+    name_esc = _html.escape(_display_name(name))
     name_url = quote(name)
     rows = "".join(
         f'<li><a href="view_3d_structure?domain={name_url}&roi={quote(lbl)}" '
@@ -2661,9 +2714,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     dem_root = str(DEM_ROOT)
     page_html: str = ""
     base_path: str = ""  # set by main() from PINN_WEBAPP_BASE_PATH
+    # Per request (one handler serves every request of a keep-alive connection).
+    _namespace: Optional[str] = None  # this session's namespace, once looked up
+    _new_session_id: Optional[str] = None  # sent as Set-Cookie with the response
 
     def _route(self) -> Optional[str]:
         """The request path below base_path, or None once a redirect or 404 is sent."""
+        self._namespace = None
+        self._new_session_id = None
         parsed = urlparse(self.path)
         path, base = parsed.path, self.base_path
         if not base:
@@ -2683,13 +2741,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _cookie_session_id(self) -> Optional[str]:
+        """The valid session id the browser sent, if any."""
+        for header in self.headers.get_all("Cookie") or []:
+            for part in header.split(";"):
+                key, _, value = part.strip().partition("=")
+                if key == SESSION_COOKIE and _SESSION_ID_RE.fullmatch(value.strip('"')):
+                    return value.strip('"')
+        return None
+
+    def _session(self) -> str:
+        """This request's session namespace; a browser without a valid session
+        cookie gets a new session (and the cookie with this response)."""
+        if self._namespace is None:
+            session_id = self._cookie_session_id()
+            if session_id is None:
+                session_id = secrets.token_hex(16)
+                self._new_session_id = session_id
+            self._namespace = _session_namespace(session_id)
+        return self._namespace
+
+    def _domain(self, raw) -> str:
+        """The on-disk name of a domain of this session (ValueError if malformed)."""
+        return _session_name(self._session(), raw)
+
+    def _session_cookie(self, session_id: str) -> str:
+        attrs = [f"{SESSION_COOKIE}={session_id}", f"Path={self.base_path}/", "HttpOnly",
+                 "SameSite=Lax"]
+        if _env_flag("PINN_WEBAPP_SECURE_COOKIE", False):
+            attrs.append("Secure")
+        return "; ".join(attrs)
+
     def end_headers(self) -> None:
+        if self._new_session_id:
+            self.send_header("Set-Cookie", self._session_cookie(self._new_session_id))
+            self._new_session_id = None
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
         super().end_headers()
 
     def _json(self, payload: dict, *, status: int = 200) -> None:
+        if self._namespace is not None:
+            payload = _public(payload, self._namespace)
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2845,6 +2939,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path in ("/", "/index.html"):
+            self._session()  # the cookie comes with the page
             body = self.page_html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2866,7 +2961,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             jid = unquote(qs.get("id", [""])[0]).strip()
             job = _job_get(jid)
-            if job is None:
+            # Another session's job is answered exactly like an unknown one.
+            if job is None or job.pop("session", None) != self._session():
                 self._json({"error": "unknown job", "state": "error"}, status=404)
             else:
                 self._json(job)
@@ -2877,7 +2973,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 if path == "/map_rose":
                     html = _rose_map_wrapper_html(domain)
                 else:
@@ -2895,7 +2991,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/runs" and _env_flag("PINN_WEBAPP_ENABLE_RUN_INDEX", False):
             try:
-                data = _runs_index_html().encode("utf-8")
+                data = _runs_index_html(self._session()).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -2911,13 +3007,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 data = _zip_plots(domain)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{domain}_plots.zip"',
+                    f'attachment; filename="{_display_name(domain)}_plots.zip"',
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -2931,12 +3027,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 zip_path = _render_vtk_zip(domain)
                 self._send_path(
                     zip_path,
                     content_type="application/zip",
-                    content_disposition=f'attachment; filename="{domain}_vtk.zip"',
+                    content_disposition=f'attachment; filename="{_display_name(domain)}_vtk.zip"',
                     allow_gzip=False,
                 )
             except Exception as ex:
@@ -2949,13 +3045,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 data = _render_npz_zip(domain)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{domain}_npz.zip"',
+                    f'attachment; filename="{_display_name(domain)}_npz.zip"',
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -2969,13 +3065,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 data = _read_pdf_bytes(domain)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/pdf")
                 self.send_header(
                     "Content-Disposition",
-                    f'attachment; filename="{domain}_report.pdf"',
+                    f'attachment; filename="{_display_name(domain)}_report.pdf"',
                 )
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -2989,11 +3085,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 self._send_path(
                     _ensure_map_html(domain),
                     content_type="text/html; charset=utf-8",
                 )
+            except FileNotFoundError as ex:  # no such run in this session
+                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -3004,10 +3102,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 html_path = _ensure_3d_html(domain)
                 disposition = (
-                    f'attachment; filename="{domain}_view_3d.html"'
+                    f'attachment; filename="{_display_name(domain)}_view_3d.html"'
                     if path == "/download_3d" else None
                 )
                 self._send_path(
@@ -3016,6 +3114,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     content_disposition=disposition,
                     allow_gzip=path != "/download_3d",
                 )
+            except FileNotFoundError as ex:  # no such run in this session
+                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -3027,7 +3127,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if not domain:
                     raise ValueError("missing ?domain=")
-                domain = _safe_name(domain)
+                domain = self._domain(domain)
                 labels = _list_saved_roi_labels(domain)
                 # Multi-ROI without explicit roi=...: show chooser page.
                 if roi_label is None and len(labels) > 1:
@@ -3039,13 +3139,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(html)
                     return
                 if roi_label is not None and roi_label not in labels:
-                    raise ValueError(f"unknown roi '{roi_label}' for domain '{domain}'")
+                    raise FileNotFoundError(f"unknown roi '{roi_label}' for domain '{domain}'")
                 html_path = _ensure_structure_3d_html(domain, roi_label=roi_label)
                 disposition = None
                 if path == "/download_3d_structure":
                     fn_suffix = f"_{roi_label}" if roi_label else ""
                     disposition = (
-                        f'attachment; filename="{domain}_view_3d_structure{fn_suffix}.html"'
+                        f'attachment; filename="{_display_name(domain)}_view_3d_structure{fn_suffix}.html"'
                     )
                 self._send_path(
                     html_path,
@@ -3053,6 +3153,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     content_disposition=disposition,
                     allow_gzip=path != "/download_3d_structure",
                 )
+            except FileNotFoundError as ex:  # no such run in this session
+                self._json({"success": False, "error": str(ex)}, status=404)
             except Exception as ex:
                 traceback.print_exc()
                 self._json({"success": False, "error": str(ex)}, status=500)
@@ -3072,7 +3174,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             admitted = False
             try:
                 west, south, east, north = _validate_dem_bounds(body)
-                name = _safe_name(body.get("domain_name", "unnamed"))
+                name = self._domain(body.get("domain_name", "unnamed"))
                 res = body.get("resolution", "2")
                 if str(res) != "2":
                     raise ValueError("only the 2 m public DEM resolution is supported")
@@ -3113,7 +3215,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route == "/upload_dem":
             admitted = False
             try:
-                name = _safe_name(body.get("domain_name", ""))
+                name = self._domain(body.get("domain_name", ""))
                 data_b64 = body.get("data_base64") or ""
                 if not data_b64:
                     raise ValueError("missing data_base64 (base64-encoded GeoTIFF)")
@@ -3160,10 +3262,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if route == "/build_inputs":
-            name = str(body.get("domain_name", "")).strip()
+            name = ""
             admitted = False
             try:
-                _safe_name(name)
+                name = self._domain(body.get("domain_name", ""))
+                body = dict(body, domain_name=name)
                 _validate_compute_request(body)
                 if not self._admit_preparation():
                     return
@@ -3188,7 +3291,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route in ("/predict", "/predict_rose"):
             is_rose = route == "/predict_rose"
             try:
-                name = _safe_name(body.get("domain_name"))
+                name = self._domain(body.get("domain_name"))
+                body = dict(body, domain_name=name)
                 _validate_compute_request(body)
                 if is_rose:
                     _parse_rose_directions(body)
@@ -3196,7 +3300,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"success": False, "error": str(e)}, status=400)
                 return
             kind = "rose" if is_rose else "predict"
-            jid, message, retry_after = _job_admit_and_create(kind)
+            jid, message, retry_after = _job_admit_and_create(kind, session=self._session())
             if jid is None:
                 self._json({
                     "success": False,
