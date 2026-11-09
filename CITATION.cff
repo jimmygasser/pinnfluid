@@ -22,3 +22,17 @@ keywords:
   - surrogate model
   - wind engineering
   - terrain
+preferred-citation:
+  type: article
+  title: "Physics-regularised neural network surrogates for fine-scale wind and pressure fields over complex terrain and structures"
+  authors:
+    - family-names: Gasser
+      given-names: Jimmy
+    - family-names: Frischholz
+      given-names: Yael
+    - family-names: Lehning
+      given-names: Michael
+  journal: "Wind Energy Science Discussions"
+  year: 2026
+  doi: "10.5194/wes-2026-179"
+  url: "https://doi.org/10.5194/wes-2026-179"

@@ -1,6 +1,8 @@
 # pinnfluid — physics-informed wind and pressure surrogate over terrain and structures
 
-[**Launch the interactive application**](https://pinnfluid.ch)
+[**Launch the interactive application**](https://pinnfluid.ch) ·
+[**Paper (WES preprint)**](https://doi.org/10.5194/wes-2026-179) ·
+[**Dataset (EnviDat)**](https://doi.org/10.16904/envidat.810)
 
 A steady-RANS surrogate that predicts the 3D wind and pressure field around
 built structures embedded in real terrain, in seconds instead of hours. The
@@ -144,5 +146,12 @@ data and third-party geometry remain subject to their respective licences.
 
 ## Citation
 
-If you use this code or the models, cite the software using
-[`CITATION.cff`](CITATION.cff). A paper citation will be added after publication.
+If you use this code or the models, please cite the paper:
+
+> Gasser, J., Frischholz, Y., and Lehning, M.: Physics-regularised neural network
+> surrogates for fine-scale wind and pressure fields over complex terrain and
+> structures, Wind Energ. Sci. Discuss. [preprint],
+> https://doi.org/10.5194/wes-2026-179, 2026.
+
+The software itself can be cited using [`CITATION.cff`](CITATION.cff). The
+reference will be updated to the final article once it is published.
